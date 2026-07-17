@@ -21,9 +21,28 @@ const EXPECTED_ICC = fs.readFileSync(path.join(FIXTURES_DIR, 'tmap-gainmap-expec
 
 let tmpDir: string;
 
+// Shared decode results: several tests below assert different things about
+// converting the *same* (fixture, options) pair through `convertHeifToJpegNode`.
+// Each of those fixtures is a real, multi-megapixel HEIC (the rotation
+// fixture alone is ~24MP), so re-decoding it once per assertion group was
+// pushing this file close to vitest's 5s default per-test timeout under
+// full-suite parallel load. Decoding each shared pair once in `beforeAll`
+// and asserting on the cached result removes that redundant cost; tests
+// that exercise a genuinely different code path (buffer-vs-path handling
+// through the `sips`-or-Node wrapper, a shadowed-`sips` failure fallback)
+// still perform their own decode and get an explicit generous timeout
+// instead, since that cost is real and not falsely shared away.
+let tmapResult: Awaited<ReturnType<typeof convertHeifToJpegNode>>;
+let rotationResult: Awaited<ReturnType<typeof convertHeifToJpegNode>>;
+let tmapBufferResult: Awaited<ReturnType<typeof convertHeifToJpegNode>>;
+
 beforeAll(async () => {
   tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'heif-test-'));
-});
+  tmapResult = await convertHeifToJpegNode(TMAP_FIXTURE, { quality: 90 });
+  rotationResult = await convertHeifToJpegNode(ROTATION_FIXTURE, { quality: 90 });
+  const tmapBuffer = await fsPromises.readFile(TMAP_FIXTURE);
+  tmapBufferResult = await convertHeifToJpegNode(tmapBuffer);
+}, 30_000);
 
 afterAll(async () => {
   if (tmpDir) {
@@ -57,7 +76,7 @@ describe('extractIccFromHeif (real fixtures)', () => {
 
 describe('convertHeifToJpegNode (real fixtures)', () => {
   test('converts the tmap fixture to a JPEG at the expected dimensions with the ICC embedded byte-identically', async () => {
-    const result = await convertHeifToJpegNode(TMAP_FIXTURE, { quality: 90 });
+    const result = tmapResult;
 
     expect(result.width).toBe(3024);
     expect(result.height).toBe(3024);
@@ -79,7 +98,7 @@ describe('convertHeifToJpegNode (real fixtures)', () => {
   // un-tone-mapped HDR decode shifts luma dramatically, which this would
   // catch.
   test('renders the tmap fixture HDR gain-map with the expected SDR tone-map (channel means)', async () => {
-    const result = await convertHeifToJpegNode(TMAP_FIXTURE, { quality: 90 });
+    const result = tmapResult;
     const stats = await sharp(result.buffer).stats();
     const means = stats.channels.map((c) => c.mean);
     const golden = [135.41, 124.73, 103.68];
@@ -90,7 +109,7 @@ describe('convertHeifToJpegNode (real fixtures)', () => {
   });
 
   test('converts the rotation fixture to a JPEG at the expected dimensions', async () => {
-    const result = await convertHeifToJpegNode(ROTATION_FIXTURE, { quality: 90 });
+    const result = rotationResult;
 
     expect(result.width).toBe(4284);
     expect(result.height).toBe(5712);
@@ -102,12 +121,11 @@ describe('convertHeifToJpegNode (real fixtures)', () => {
     expect(metadata.height).toBe(5712);
   });
 
-  test('accepts a Buffer input, not just a file path', async () => {
-    const inputBuffer = await fsPromises.readFile(TMAP_FIXTURE);
-    const result = await convertHeifToJpegNode(inputBuffer, { quality: 90 });
-
-    expect(result.width).toBe(3024);
-    expect(result.height).toBe(3024);
+  test('accepts a Buffer input, not just a file path', () => {
+    // Shares the decode with the "default 256 MiB bound" test below —
+    // both call convertHeifToJpegNode with a Buffer and default options.
+    expect(tmapBufferResult.width).toBe(3024);
+    expect(tmapBufferResult.height).toBe(3024);
   });
 });
 
@@ -124,8 +142,7 @@ describe('Node fallback retains source EXIF (#36)', () => {
     const source = await exifr.parse(TMAP_FIXTURE, ['Make', 'Model', 'DateTimeOriginal']);
     expect(source.Make).toBe('Apple'); // fixture sanity: the source really has EXIF
 
-    const result = await convertHeifToJpegNode(TMAP_FIXTURE, { quality: 90 });
-    const output = await exifr.parse(result.buffer, ['Make', 'Model', 'DateTimeOriginal']);
+    const output = await exifr.parse(tmapResult.buffer, ['Make', 'Model', 'DateTimeOriginal']);
 
     expect(output.Make).toBe(source.Make);
     expect(output.Model).toBe(source.Model);
@@ -133,7 +150,7 @@ describe('Node fallback retains source EXIF (#36)', () => {
   });
 
   test('EXIF Orientation in the output is neutralised to 1 (decoder already applied irot/imir)', async () => {
-    const result = await convertHeifToJpegNode(ROTATION_FIXTURE, { quality: 90 });
+    const result = rotationResult;
 
     // decoded pixels are already display-oriented (portrait)
     expect(result.width).toBe(4284);
@@ -146,7 +163,13 @@ describe('Node fallback retains source EXIF (#36)', () => {
 });
 
 describe('convertHeifToJpeg (wrapper, real fixture)', () => {
-  test('succeeds end-to-end via the sips-or-Node wrapper', async () => {
+  // Each test in this describe block exercises the sips-or-Node wrapper
+  // itself (a genuinely different code path from convertHeifToJpegNode
+  // above) with a real fixture decode, so its cost isn't shareable via
+  // beforeAll. An explicit generous timeout replaces vitest's 5s default,
+  // which a full-megapixel decode can approach under full-suite parallel
+  // load.
+  test('succeeds end-to-end via the sips-or-Node wrapper', { timeout: 30_000 }, async () => {
     // On Linux (this test environment) `sips` doesn't exist, so this
     // exercises the sips-ENOENT -> Node fallback path. On macOS it would
     // exercise sips directly. Both are valid outcomes for this test.
@@ -158,13 +181,17 @@ describe('convertHeifToJpeg (wrapper, real fixture)', () => {
     expect(metadata.height).toBe(3024);
   });
 
-  test('accepts a Buffer input directly (skips the sips path, which requires a file path)', async () => {
-    const inputBuffer = await fsPromises.readFile(ROTATION_FIXTURE);
-    const result = await convertHeifToJpeg(inputBuffer, { quality: 90 });
+  test(
+    'accepts a Buffer input directly (skips the sips path, which requires a file path)',
+    { timeout: 30_000 },
+    async () => {
+      const inputBuffer = await fsPromises.readFile(ROTATION_FIXTURE);
+      const result = await convertHeifToJpeg(inputBuffer, { quality: 90 });
 
-    expect(result.width).toBe(4284);
-    expect(result.height).toBe(5712);
-  });
+      expect(result.width).toBe(4284);
+      expect(result.height).toBe(5712);
+    },
+  );
 });
 
 describe('hardening: sips failure (not just ENOENT) falls back to Node', () => {
@@ -193,14 +220,18 @@ describe('hardening: sips failure (not just ENOENT) falls back to Node', () => {
     await fsPromises.rm(fakeSipsDir, { recursive: true, force: true });
   });
 
-  test('convertHeifToJpeg still succeeds via the Node fallback when sips fails non-ENOENT', async () => {
-    const result = await convertHeifToJpeg(TMAP_FIXTURE, { quality: 90 });
+  test(
+    'convertHeifToJpeg still succeeds via the Node fallback when sips fails non-ENOENT',
+    { timeout: 30_000 },
+    async () => {
+      const result = await convertHeifToJpeg(TMAP_FIXTURE, { quality: 90 });
 
-    expect(result.width).toBe(3024);
-    expect(result.height).toBe(3024);
-    expect(result.iccApplied).toBe(true);
-    expect(result.converter).toBe('node');
-  });
+      expect(result.width).toBe(3024);
+      expect(result.height).toBe(3024);
+      expect(result.iccApplied).toBe(true);
+      expect(result.converter).toBe('node');
+    },
+  );
 });
 
 describe('hardening: maxInputBytes', () => {
@@ -217,9 +248,9 @@ describe('hardening: maxInputBytes', () => {
     ).rejects.toThrow(/maxInputBytes/);
   });
 
-  test('does not reject inputs within the default 256 MiB bound', async () => {
-    const buffer = await fsPromises.readFile(TMAP_FIXTURE);
-    await expect(convertHeifToJpegNode(buffer)).resolves.toBeDefined();
+  test('does not reject inputs within the default 256 MiB bound', () => {
+    // Shares the decode with "accepts a Buffer input" above.
+    expect(tmapBufferResult).toBeDefined();
   });
 });
 
