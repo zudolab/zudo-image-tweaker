@@ -401,6 +401,7 @@ async function loadRemote(url: string, { fetchTimeoutMs, maxInputBytes }: LoadIn
       throw error; // unreachable — rethrowMapped always throws
     }
     if (!response.ok) {
+      controller.abort(); // don't leave the error-response body downloading
       throw new Error(`Failed to fetch "${url}": HTTP ${response.status} ${response.statusText}`);
     }
 
