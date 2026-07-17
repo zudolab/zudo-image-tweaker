@@ -43,6 +43,50 @@ describe('encodeImageToBlurhash', () => {
     expect(isBlurhashValid(large).result).toBe(true);
     expect(large.length).toBeGreaterThan(small.length);
   });
+
+  it('rejects out-of-range or non-integer component counts', async () => {
+    const image = await syntheticImage();
+    await expect(encodeImageToBlurhash(image, { componentsX: 4.5 })).rejects.toThrow();
+    await expect(encodeImageToBlurhash(image, { componentsX: 0 })).rejects.toThrow();
+    await expect(encodeImageToBlurhash(image, { componentsY: 10 })).rejects.toThrow();
+  });
+
+  it('auto-orients the source per EXIF before hashing', async () => {
+    const width = 64;
+    const height = 48;
+    const channels = 3;
+    const raw = Buffer.alloc(width * height * channels);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * channels;
+        raw[i] = Math.floor((x / width) * 255); // R
+        raw[i + 1] = 0;
+        raw[i + 2] = Math.floor((y / height) * 255); // B
+      }
+    }
+
+    // The already-upright image (no orientation tag needed). PNG keeps this
+    // lossless so the comparison below isn't muddied by JPEG artifacts.
+    const upright = await sharp(raw, { raw: { width, height, channels } }).png().toBuffer();
+
+    // Same pixels physically rotated -90deg (sharp's own rotation, so the
+    // pixel math is trustworthy) and tagged with EXIF orientation 6, which
+    // instructs viewers to rotate +90deg to correct it back to `upright`.
+    const rotatedRaw = await sharp(raw, { raw: { width, height, channels } })
+      .rotate(-90)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const oriented = await sharp(rotatedRaw.data, {
+      raw: { width: rotatedRaw.info.width, height: rotatedRaw.info.height, channels },
+    })
+      .withMetadata({ orientation: 6 })
+      .png()
+      .toBuffer();
+
+    const uprightHash = await encodeImageToBlurhash(upright);
+    const orientedHash = await encodeImageToBlurhash(oriented);
+    expect(orientedHash).toBe(uprightHash);
+  });
 });
 
 describe('blurhashToDataUri', () => {
@@ -106,5 +150,12 @@ describe('batchBlurhashToDataUri', () => {
 
   it('returns an empty array for an empty input', async () => {
     expect(await batchBlurhashToDataUri([])).toEqual([]);
+  });
+
+  it('rejects a non-positive chunkSize instead of looping forever', async () => {
+    const image = await syntheticImage();
+    const hash = await encodeImageToBlurhash(image);
+    await expect(batchBlurhashToDataUri([hash], { chunkSize: 0 })).rejects.toThrow();
+    await expect(batchBlurhashToDataUri([hash], { chunkSize: -1 })).rejects.toThrow();
   });
 });

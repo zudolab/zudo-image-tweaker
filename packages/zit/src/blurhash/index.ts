@@ -10,6 +10,19 @@ export interface EncodeImageToBlurhashOptions {
   rawSize?: number;
 }
 
+// blurhash's own encoding scheme packs component counts into a single
+// base83 size flag, which only has room for 1-9 per axis.
+const MIN_COMPONENTS = 1;
+const MAX_COMPONENTS = 9;
+
+function assertValidComponentCount(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < MIN_COMPONENTS || value > MAX_COMPONENTS) {
+    throw new Error(
+      `encodeImageToBlurhash: ${label} must be an integer between ${MIN_COMPONENTS} and ${MAX_COMPONENTS}, got ${value}`,
+    );
+  }
+}
+
 /**
  * Encode an image into a blurhash string. Downsamples the source with sharp,
  * then feeds the raw RGBA pixels to the blurhash algorithm.
@@ -19,8 +32,11 @@ export async function encodeImageToBlurhash(
   options: EncodeImageToBlurhashOptions = {},
 ): Promise<string> {
   const { componentsX = 4, componentsY = 4, rawSize = 32 } = options;
+  assertValidComponentCount(componentsX, 'componentsX');
+  assertValidComponentCount(componentsY, 'componentsY');
 
   const { data, info } = await sharp(input)
+    .rotate() // auto-orient per EXIF before hashing, so the hash matches the visually upright image
     .raw()
     .ensureAlpha()
     .resize(rawSize, rawSize, { fit: 'inside' })
@@ -69,6 +85,9 @@ export async function batchBlurhashToDataUri(
   options: BatchBlurhashToDataUriOptions = {},
 ): Promise<string[]> {
   const { chunkSize = 20 } = options;
+  if (!Number.isInteger(chunkSize) || chunkSize < 1) {
+    throw new Error(`batchBlurhashToDataUri: chunkSize must be a positive integer, got ${chunkSize}`);
+  }
 
   const results: string[] = [];
   for (let i = 0; i < hashes.length; i += chunkSize) {

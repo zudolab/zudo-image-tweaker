@@ -23,7 +23,21 @@ export function parseExifDate(buffer: Buffer | Uint8Array | null | undefined): D
 
   const [, year, month, day, hour, minute, second] = match;
   const date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (Number.isNaN(date.getTime())) return null;
+
+  // `Date` silently rolls over out-of-range fields (e.g. `2024:04:31` becomes
+  // May 1st) instead of producing Invalid Date, so a match on the pattern
+  // isn't proof the value was a real calendar date. Reject anything that
+  // doesn't round-trip back to the exact fields we parsed.
+  const roundTrips =
+    date.getUTCFullYear() === Number(year) &&
+    date.getUTCMonth() === Number(month) - 1 &&
+    date.getUTCDate() === Number(day) &&
+    date.getUTCHours() === Number(hour) &&
+    date.getUTCMinutes() === Number(minute) &&
+    date.getUTCSeconds() === Number(second);
+
+  return roundTrips ? date : null;
 }
 
 /**

@@ -32,6 +32,18 @@ describe('parseExifDate', () => {
     const date = parseExifDate(buffer);
     expect(date?.toISOString()).toBe('2023-01-02T03:04:05.000Z');
   });
+
+  it('rejects pattern-matching but calendar-invalid dates instead of silently rolling over', () => {
+    // `Date` normalizes these into the next month rather than producing
+    // Invalid Date, so a naive NaN check alone would accept them.
+    expect(parseExifDate(Buffer.from('2024:04:31 00:00:00', 'latin1'))).toBeNull();
+    expect(parseExifDate(Buffer.from('2023:02:29 00:00:00', 'latin1'))).toBeNull();
+  });
+
+  it('accepts a valid leap-day date', () => {
+    const date = parseExifDate(Buffer.from('2024:02:29 12:00:00', 'latin1'));
+    expect(date?.toISOString()).toBe('2024-02-29T12:00:00.000Z');
+  });
 });
 
 describe('bakeOrientation / stripExif', () => {
