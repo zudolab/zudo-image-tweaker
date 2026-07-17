@@ -160,8 +160,11 @@ function isSafeSlug(slug: string): boolean {
 // before it lack the retained profile. v3: removed the redundant
 // pre-pipeline bakeOrientation re-encode (issue #29) — variants produced
 // under bakeExifOrientation/stripMetadata before it carry an extra
-// generation of JPEG loss.
-const PIPELINE_VERSION = 3;
+// generation of JPEG loss. v4: animated WebP/APNG/AVIF passthrough (issue
+// #28) — a pre-change cache for such a source records `animated: false`
+// plus a flattened-still manifest, so without the bump an unchanged source
+// stays a cache hit and never gets its passthrough copy.
+const PIPELINE_VERSION = 4;
 
 function fingerprintConfig(cfg: ResolvedConfig): string {
   return JSON.stringify({
