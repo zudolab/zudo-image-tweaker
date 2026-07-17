@@ -27,6 +27,7 @@ Every field is optional except `outputDir`.
 | `fallbackBlurhash` | none | blurhash to record when encoding fails. Omitted means a failed encode records `null`. |
 | `tagParser` | the `__og` / `__ogonly` parser | Filename-tag parser — see [Tag dispatch](#tag-dispatch-by-filename) below. |
 | `autoRepair` | `true` | Attempt corruption repair via `magick`/`ffmpeg` when available — see [External Binaries](./external-binaries.mdx). |
+| `backupCorrupted` | `false` | Copy each corrupt source to a sibling `<name>.corrupted.bak` before repair (the source itself is never modified). |
 | `bakeExifOrientation` | `false` | Bake EXIF orientation into pixels (and drop metadata) before encoding. |
 | `stripMetadata` | `false` | Strip all metadata before encoding. Routed through the same orientation-baking step as `bakeExifOrientation`, since stripping the EXIF tag alone would leave a sideways image once the variant pipeline auto-orients. |
 | `onMetadata` | none | Invoked (and awaited) with each produced or cache-hit `VariantMetadata` record. |

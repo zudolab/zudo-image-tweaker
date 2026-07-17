@@ -78,6 +78,7 @@ just the `ProcessOneConfig` shape.
 | `fallbackBlurhash` | `string` | — | blurhash to record when encoding fails. Omitted means the record's `blurhash` is `null` on failure. |
 | `tagParser` | `TagParser` | `defaultTagParser` | Derives `{ mode, slug }` from a filename; see [Filename-tag dispatch](#filename-tag-dispatch). |
 | `autoRepair` | `boolean` | `true` | Attempt corruption repair via `magick`/`ffmpeg` when available (see [Caveats](#caveats)). |
+| `backupCorrupted` | `boolean` | `false` | When repair runs, first copy the corrupt source to a sibling `<name>.corrupted.bak`. The source itself is never modified either way. |
 | `bakeExifOrientation` | `boolean` | `false` | Bake EXIF orientation into pixels (and drop metadata) before encoding, via [`/exif`](./exif.mdx). |
 | `stripMetadata` | `boolean` | `false` | Strip all metadata before encoding. Subsumed by `bakeExifOrientation` — stripping without baking would leave a sideways image once the variant pipeline auto-orients. |
 | `cleanupOrphans` | `boolean` | `false` | Remove output slug directories no longer backed by any input. Only ever touches direct children of `outputDir`. |
@@ -130,10 +131,14 @@ trusted-input-only decoder warning documented there.
 :::
 
 - **External-binary repair is best-effort.** `autoRepair` (default `true`)
-  tries `magick` then `ffmpeg` on sharp decode errors that look like
-  bitstream corruption; on a host with neither installed (e.g. plain Linux
+  tries `magick` (a strip/normalise pass, then a format-swap re-decode through
+  the sibling raster format) then `ffmpeg` on sharp decode errors that look
+  like bitstream corruption; on a host with neither installed (e.g. plain Linux
   without ImageMagick) it warns to the console and leaves the file in
-  `ProcessSummary.failed` rather than failing the whole run.
+  `ProcessSummary.failed` rather than failing the whole run. Set
+  `backupCorrupted: true` to copy each corrupt source to a sibling
+  `<name>.corrupted.bak` before the attempt (the source itself is never
+  modified).
 - **Duplicate slugs are rejected up front.** Two inputs that normalize to the
   same output slug (e.g. `photo.jpg` and `photo__og.jpg`) would race on one
   output directory; `processImages` reports both as failures at the `'slug'`

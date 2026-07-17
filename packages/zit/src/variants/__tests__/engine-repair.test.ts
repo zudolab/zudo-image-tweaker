@@ -43,8 +43,15 @@ describe('variant-stage corruption repair', () => {
 
     expect(result.status).toBe('processed');
     expect(mockRepair).toHaveBeenCalledTimes(1);
-    expect(mockRepair).toHaveBeenCalledWith(truncatedPath);
+    expect(mockRepair).toHaveBeenCalledWith(truncatedPath, { backupCorrupted: false });
     expect(await fs.readFile(path.join(outputDir, 'truncated', '600w.webp'))).toBeInstanceOf(Buffer);
+  });
+
+  it('threads backupCorrupted from config through to the repair call', async () => {
+    mockRepair.mockResolvedValue(validJpeg);
+    await processOne({ inputPath: truncatedPath }, { outputDir, backupCorrupted: true });
+
+    expect(mockRepair).toHaveBeenCalledWith(truncatedPath, { backupCorrupted: true });
   });
 
   it('fails cleanly when repair is unavailable', async () => {

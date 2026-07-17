@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,8 +37,9 @@ async function repairWith(
   command: string,
   buildArgs: (inputPath: string, outputPath: string) => string[],
   inputPath: string,
+  outputExt = 'jpg',
 ): Promise<Buffer | null> {
-  const outputPath = path.join(os.tmpdir(), `zit-repair-${process.pid}-${randomUUID()}.jpg`);
+  const outputPath = path.join(os.tmpdir(), `zit-repair-${process.pid}-${randomUUID()}.${outputExt}`);
   try {
     await run(command, buildArgs(resolveBinaryPath(inputPath), outputPath));
     const buffer = await fs.readFile(outputPath);
@@ -53,24 +55,91 @@ async function repairWith(
 }
 
 /**
- * Attempt to recover a corrupt image by re-encoding it through an external
- * tool, returning a clean JPEG buffer or null if repair isn't possible.
- *
- * Repair is best-effort and entirely optional: ImageMagick (`magick`) is
- * tried first, then `ffmpeg`, each only if feature-detected on the host.
- * On a machine with neither (e.g. plain Linux without ImageMagick), this
- * warns and returns null rather than failing — a missing optional binary
- * must never break a run. The caller's source file is never mutated; the
- * repaired bytes are produced in a throwaway temp file.
+ * The JPEG/PNG re-encode pair to try, in order: the source's own format first
+ * (a JPEG re-encodes as JPEG, a PNG as PNG), then the sibling. A bitstream a
+ * same-format re-encode can't recover sometimes survives the decoder switch to
+ * the sibling. Sources that aren't JPEG or PNG default to `['jpg', 'png']`.
  */
-export async function repairCorruptedImage(inputPath: string): Promise<Buffer | null> {
+function repairFormatPair(inputPath: string): ['png' | 'jpg', 'png' | 'jpg'] {
+  return path.extname(inputPath).toLowerCase() === '.png' ? ['png', 'jpg'] : ['jpg', 'png'];
+}
+
+/**
+ * Copy the untouched corrupt source to a sibling `<name>.corrupted.bak` before
+ * a repair attempt, so an operator can inspect or recover the true original.
+ * Best-effort and non-fatal — a repair must never fail because its backup did.
+ * `COPYFILE_EXCL` preserves the FIRST backup (the most-original bytes): a later
+ * repair of the same path finds the `.bak` already there and leaves it be.
+ */
+async function backupCorruptedSource(inputPath: string): Promise<void> {
+  const backupPath = `${inputPath}.corrupted.bak`;
+  try {
+    await fs.copyFile(inputPath, backupPath, fsConstants.COPYFILE_EXCL);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return;
+    console.warn(
+      `zit/variants: could not back up corrupt source "${path.basename(inputPath)}": ${(error as Error).message}`,
+    );
+  }
+}
+
+export interface RepairCorruptedImageOptions {
+  /**
+   * Before attempting repair, copy the untouched corrupt source to a sibling
+   * `<name>.corrupted.bak`. Off by default — repair otherwise never touches the
+   * caller's file at all. An existing `.bak` is kept, never overwritten.
+   * @default false
+   */
+  backupCorrupted?: boolean;
+}
+
+/**
+ * Attempt to recover a corrupt image by re-encoding it through an external
+ * tool, returning a clean image buffer or null if repair isn't possible.
+ *
+ * Repair is best-effort and entirely optional. When ImageMagick (`magick`) is
+ * available it is tried twice — first a strip + colourspace normalise, then a
+ * format-swap re-decode through the sibling raster format (jpg<->png), which
+ * recovers a bitstream the same-format pass can't. `ffmpeg` is tried last.
+ * Each strategy runs only if its binary is feature-detected; on a machine with
+ * neither (e.g. plain Linux without ImageMagick) this warns and returns null
+ * rather than failing — a missing optional binary must never break a run.
+ *
+ * The caller's source file is never modified. With `backupCorrupted` set, a
+ * sibling `<name>.corrupted.bak` copy is written before the attempt (the source
+ * itself is still left untouched); by default no backup is made.
+ */
+export async function repairCorruptedImage(
+  inputPath: string,
+  options: RepairCorruptedImageOptions = {},
+): Promise<Buffer | null> {
+  if (options.backupCorrupted) {
+    await backupCorruptedSource(inputPath);
+  }
+
   if (await hasMagick()) {
-    const repaired = await repairWith(
+    const [primaryExt, siblingExt] = repairFormatPair(inputPath);
+
+    // Strategy 1: strip metadata + normalise colourspace, re-encoding in the
+    // source's own format (jpg->jpg, png->png; other formats default to jpg).
+    const stripped = await repairWith(
       'magick',
       (input, output) => [input, '-strip', '-set', 'colorspace', 'sRGB', output],
       inputPath,
+      primaryExt,
     );
-    if (repaired) return repaired;
+    if (stripped) return stripped;
+
+    // Strategy 2: format-swap re-decode through the sibling raster format
+    // (jpg<->png); a bitstream the same-format strip pass can't recover
+    // sometimes survives the decoder switch (issue #99).
+    const swapped = await repairWith(
+      'magick',
+      (input, output) => [input, output],
+      inputPath,
+      siblingExt,
+    );
+    if (swapped) return swapped;
   }
 
   if (await hasFfmpeg()) {

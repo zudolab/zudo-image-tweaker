@@ -144,6 +144,15 @@ export interface ProcessOneConfig {
   /** Attempt to repair corrupt sources via magick/ffmpeg when available. @default true */
   autoRepair?: boolean;
   /**
+   * When corruption auto-repair runs (see {@link autoRepair}), first copy the
+   * untouched corrupt source to a sibling `<name>.corrupted.bak` so its
+   * original bytes can be inspected or recovered. A no-op unless `autoRepair`
+   * is on AND a repair is actually attempted; an existing `.bak` is never
+   * overwritten. The source file itself is never modified either way.
+   * @default false
+   */
+  backupCorrupted?: boolean;
+  /**
    * Bake EXIF orientation into pixels. The pipeline ALWAYS does this —
    * the variant encode chain (and blurhash/OGP) auto-orient via sharp's
    * `.rotate()`, and no output ever carries an EXIF orientation tag — so
