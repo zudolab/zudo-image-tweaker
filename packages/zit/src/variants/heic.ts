@@ -8,12 +8,41 @@ const JPEG_EXTENSIONS = new Set(['.jpg', '.jpeg']);
 // `file` reports the `-sequence` variants for HEIC/HEIF burst/live-photo
 // payloads (multiple embedded images), which still need HEIF conversion.
 const HEIC_MIME_TYPES = new Set(['image/heic', 'image/heic-sequence', 'image/heif', 'image/heif-sequence']);
-// Loose `text/*` match (rather than an exact-value allowlist) catches HTML,
-// plain text, XML, CSV, and any other textual response saved with an image
-// extension — the same breadth the old "HTML"/"ASCII text" substring match
-// covered, without reintroducing a path-substring false positive.
+// Textual `application/*` payloads that `file` reports with a non-`text/`
+// MIME type but which are plainly not images — a JSON/XML error response or
+// an API body downloaded to `photo.jpg`. Without these, such a file slips
+// past the `text/*` prefix check and reaches the sharp pipeline, surfacing
+// as a confusing `probe` decode error instead of a clean non-image skip.
+const NON_IMAGE_APPLICATION_MIME_TYPES = new Set([
+  'application/json',
+  'application/ld+json',
+  'application/manifest+json',
+  'application/xml',
+  'application/xhtml+xml',
+  'application/rss+xml',
+  'application/atom+xml',
+  'application/javascript',
+  'application/ecmascript',
+  'application/yaml',
+  'application/x-yaml',
+  'application/x-sh',
+  'application/x-httpd-php',
+]);
+
+// A textual response saved with an image extension. The `text/*` prefix
+// covers HTML, plain text, XML, CSV, etc.; the explicit application set plus
+// the `+xml`/`+json` structured-syntax suffixes cover the textual
+// `application/*` types `file` reports with a non-`text/` MIME (e.g.
+// `application/json`). Kept broad on purpose — the old "HTML"/"ASCII text"
+// substring match caught these too — without reintroducing a path-substring
+// false positive.
 function isNonImageMimeType(mimeType: string): boolean {
-  return mimeType.startsWith('text/');
+  if (mimeType.startsWith('text/')) return true;
+  if (NON_IMAGE_APPLICATION_MIME_TYPES.has(mimeType)) return true;
+  return (
+    mimeType.startsWith('application/') &&
+    (mimeType.endsWith('+xml') || mimeType.endsWith('+json'))
+  );
 }
 
 /**

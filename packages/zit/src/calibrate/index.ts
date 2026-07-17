@@ -52,14 +52,12 @@
  * restored) — there is no `stripMetadata`-style opt-out.
  */
 
-import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import sharp from 'sharp';
-
-const execFileAsync = promisify(execFile);
+import { isMissingBinaryError, resolveBinaryPath, run } from '../variants/run.js';
 
 // Same default as the shared variants runner (src/variants/run.ts): long
 // enough for a real conversion, short enough that a hung `sips` process
@@ -141,19 +139,20 @@ function isHeicPath(input: string): boolean {
  * corrupt file) is rethrown unchanged.
  */
 async function tryHeicToTempJpeg(heicPath: string, timeoutMs: number): Promise<string | null> {
-  const tempPath = path.join(
-    os.tmpdir(),
-    `zit-calibrate-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`,
-  );
-  // Resolved before it reaches `sips`' argv so a bare leading-dash relative
-  // filename (e.g. `-rf.heic`) can never be parsed as an option flag
-  // (issue #66).
-  const resolvedHeicPath = path.resolve(heicPath);
+  // randomUUID (not pid+timestamp) avoids output-path collisions between
+  // concurrent conversions in the same process, matching the sibling /heif
+  // module's tryConvertWithSips.
+  const tempPath = path.join(os.tmpdir(), `zit-calibrate-${process.pid}-${randomUUID()}.jpg`);
   try {
-    // Argument order matches the sibling /heif module (see heif/index.ts):
-    // all `-s` options first, then the input file, then `--out` last — the
-    // order documented in `man sips` (`sips [options] file... --out outfile`).
-    await execFileAsync(
+    // Shared hardened exec seam (variants/run.ts): argument array (never a
+    // shell string), the input path resolved before it reaches argv so a
+    // leading-dash relative filename can't be read as an option flag (issue
+    // #66), and a SIGKILL-enforced timeout (issue #67). Argument order
+    // matches the sibling /heif module — all `-s` options first, then the
+    // input file, then `--out` last — per `man sips`
+    // (`sips [options] file... --out outfile`). On timeout `run` rejects,
+    // handled below like any other non-ENOENT sips failure.
+    await run(
       'sips',
       [
         '-s',
@@ -162,14 +161,11 @@ async function tryHeicToTempJpeg(heicPath: string, timeoutMs: number): Promise<s
         '-s',
         'formatOptions',
         '95',
-        resolvedHeicPath,
+        resolveBinaryPath(heicPath),
         '--out',
         tempPath,
       ],
-      // SIGKILL (not SIGTERM) so a `sips` process that ignores or handles
-      // SIGTERM can't defeat the timeout (see variants/run.ts's RunOptions
-      // doc for the same reasoning).
-      { timeout: timeoutMs, killSignal: 'SIGKILL' },
+      { timeoutMs },
     );
   } catch (error) {
     // A non-zero `sips` exit can still leave a partial `tempPath` on disk
@@ -177,7 +173,7 @@ async function tryHeicToTempJpeg(heicPath: string, timeoutMs: number): Promise<s
     // mirroring the sibling /heif module's tryConvertWithSips, so a
     // failed conversion never leaks a temp JPEG (issue #34).
     await fs.rm(tempPath, { force: true });
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (isMissingBinaryError(error)) {
       return null;
     }
     throw new Error(
@@ -582,10 +578,7 @@ export async function normalizeBackgroundColor(
       // `pipeline` was built from a raw buffer with no profile of its own,
       // this only tags the output — it does not run a colour transform
       // (verified empirically; see the module doc comment).
-      iccTempPath = path.join(
-        os.tmpdir(),
-        `zit-calibrate-icc-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.icc`,
-      );
+      iccTempPath = path.join(os.tmpdir(), `zit-calibrate-icc-${process.pid}-${randomUUID()}.icc`);
       await fs.writeFile(iccTempPath, icc);
       pipeline = pipeline.withIccProfile(iccTempPath);
     }

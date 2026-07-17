@@ -59,6 +59,13 @@ export async function blurhashToDataUri(
   options: BlurhashToDataUriOptions = {},
 ): Promise<string> {
   const { size = 16 } = options;
+  // A 0/negative/fractional size flows straight into `decode` and sharp's
+  // raw buffer dimensions, where it surfaces as an opaque sharp error rather
+  // than a named validation failure — guard it explicitly, mirroring
+  // batchBlurhashToDataUri's chunkSize and calibrate's patchSize guards.
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new Error(`blurhashToDataUri: size must be a positive integer, got ${size}`);
+  }
 
   const pixels = decode(hash, size, size);
   const pngBuffer = await sharp(Buffer.from(pixels), {
