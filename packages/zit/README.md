@@ -14,21 +14,23 @@ pnpm add @takazudo/zudo-image-tweaker
 
 ## Modules
 
-| Subpath | Description |
-|---|---|
-| `@takazudo/zudo-image-tweaker/variants` | Multi-width WebP variant engine (content-hash cache, repair, tag dispatch). |
-| `@takazudo/zudo-image-tweaker/heif` | HEIC/HEIF → JPEG conversion with ICC profile preservation. |
-| `@takazudo/zudo-image-tweaker/ogp` | Social-card (Open Graph / Twitter card) image compositor. |
-| `@takazudo/zudo-image-tweaker/budget` | Byte-budget encode ladder. |
-| `@takazudo/zudo-image-tweaker/square` | Five-mode square-crop toolbox. |
-| `@takazudo/zudo-image-tweaker/product-photo` | ML background removal + procedural shadows for product photography. |
-| `@takazudo/zudo-image-tweaker/calibrate` | Background color normalization. |
-| `@takazudo/zudo-image-tweaker/composite` | Overlay batch compositing. |
-| `@takazudo/zudo-image-tweaker/blurhash` | BlurHash placeholder generation. |
-| `@takazudo/zudo-image-tweaker/exif` | EXIF metadata extraction. |
-| `@takazudo/zudo-image-tweaker/browser` | Client-side upload preparation pipeline. |
+| Subpath | Description | Docs |
+|---|---|---|
+| `@takazudo/zudo-image-tweaker/variants` | Multi-width WebP variant engine (content-hash cache, repair, tag dispatch). | [variants](https://zudo-image-tweaker.takazudomodular.com/modules/variants/) |
+| `@takazudo/zudo-image-tweaker/heif` | HEIC/HEIF → JPEG conversion with ICC profile preservation. | [heif](https://zudo-image-tweaker.takazudomodular.com/modules/heif/) |
+| `@takazudo/zudo-image-tweaker/ogp` | Social-card (Open Graph / Twitter card) image compositor. | [ogp](https://zudo-image-tweaker.takazudomodular.com/modules/ogp/) |
+| `@takazudo/zudo-image-tweaker/budget` | Byte-budget encode ladder. | [budget](https://zudo-image-tweaker.takazudomodular.com/modules/budget/) |
+| `@takazudo/zudo-image-tweaker/square` | Five-mode square-crop toolbox. | [square](https://zudo-image-tweaker.takazudomodular.com/modules/square/) |
+| `@takazudo/zudo-image-tweaker/product-photo` | ML background removal + procedural shadows for product photography. | [product-photo](https://zudo-image-tweaker.takazudomodular.com/modules/product-photo/) |
+| `@takazudo/zudo-image-tweaker/calibrate` | Background color normalization. | [calibrate](https://zudo-image-tweaker.takazudomodular.com/modules/calibrate/) |
+| `@takazudo/zudo-image-tweaker/composite` | Overlay batch compositing. | [composite](https://zudo-image-tweaker.takazudomodular.com/modules/composite/) |
+| `@takazudo/zudo-image-tweaker/blurhash` | BlurHash placeholder generation. | [blurhash](https://zudo-image-tweaker.takazudomodular.com/modules/blurhash/) |
+| `@takazudo/zudo-image-tweaker/exif` | EXIF metadata extraction. | [exif](https://zudo-image-tweaker.takazudomodular.com/modules/exif/) |
+| `@takazudo/zudo-image-tweaker/browser` | Client-side upload preparation pipeline. | [browser](https://zudo-image-tweaker.takazudomodular.com/modules/browser/) |
 
-Each module is documented in the [docs site](https://zudo-image-tweaker.takazudomodular.com/).
+The docs site scaffold has landed but per-module pages have not been written
+yet (tracked separately) — the links above use the site's expected URL
+convention as placeholders and will 404 until that content ships.
 
 ## Optional peer dependencies
 

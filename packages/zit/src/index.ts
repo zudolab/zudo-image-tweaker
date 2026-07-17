@@ -15,9 +15,20 @@ export * from './browser/index.js';
 // `Orientation` / `deriveOrientation` (exif and browser). Each remains
 // fully reachable via its own subpath export (e.g. `.../product-photo`,
 // `.../browser`); these explicit re-exports just pick which one the flat
-// barrel surfaces so the barrel type-checks. Server-oriented modules win
-// here since the root entry is the server entry (browser is a dedicated
-// client-safe subpath). Owned by the integration pass — revisit there.
+// barrel surfaces so the barrel type-checks.
+//
+// - `ImageInput`: composite's version (sharp's `SharpInput`, which includes
+//   `string | Buffer` plus typed arrays/`ArrayBuffer`) is a strict superset
+//   of product-photo's (`string | Buffer`), so re-exporting composite's is
+//   non-narrowing for any product-photo caller going through the root.
+// - `Orientation` / `deriveOrientation`: exif's and browser's versions are
+//   structurally identical (`'landscape' | 'portrait' | 'square'`, derived
+//   the same way from width/height); exif's additionally validates and
+//   throws on non-finite/non-positive dimensions. It's re-exported here
+//   since the root entry is the server entry (browser is a dedicated
+//   client-safe subpath with its own stricter chunk-isolation guarantees).
+//
+// Reviewed and confirmed during the integration pass (issue #17).
 export type { ImageInput } from './composite/index.js';
 export type { Orientation } from './exif/index.js';
 export { deriveOrientation } from './exif/index.js';
