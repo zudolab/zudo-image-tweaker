@@ -10,9 +10,12 @@
 import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import sharp from 'sharp';
 import { convertHeifToJpeg } from '../index.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let tmpDirWithSpace: string;
 
@@ -28,11 +31,7 @@ afterAll(async () => {
 
 describe('HEIC path-with-space safety', () => {
   test('convertHeifToJpeg succeeds when the input path contains a space', async () => {
-    const source = path.join(
-      path.dirname(new URL(import.meta.url).pathname),
-      'fixtures',
-      'tmap-gainmap.heic',
-    );
+    const source = path.join(__dirname, 'fixtures', 'tmap-gainmap.heic');
     const spacedPath = path.join(tmpDirWithSpace, 'test image with spaces.heic');
     await fsPromises.copyFile(source, spacedPath);
 

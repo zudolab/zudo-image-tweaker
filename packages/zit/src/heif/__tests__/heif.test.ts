@@ -64,14 +64,18 @@ describe('convertHeifToJpegNode (real fixtures)', () => {
 
   // Tone-map guard: golden channel means observed at implementation time
   // (heic-decode 2.1.0 / libheif-js 1.19.8, the exact pinned dependency
-  // version). Guards against a future libheif-js bump silently changing
-  // the HDR->SDR tone-map — an un-tone-mapped HDR decode shifts luma
-  // dramatically, which this would catch.
+  // version) against the encoded JPEG's raw sample values -- this module
+  // embeds the ICC profile as metadata (see embedIccProfileInJpeg) rather
+  // than colour-transforming through it, so these means reflect the
+  // decoder's tone-map output unaltered. Guards against a future
+  // libheif-js bump silently changing the HDR->SDR tone-map — an
+  // un-tone-mapped HDR decode shifts luma dramatically, which this would
+  // catch.
   test('renders the tmap fixture HDR gain-map with the expected SDR tone-map (channel means)', async () => {
     const result = await convertHeifToJpegNode(TMAP_FIXTURE, { quality: 90 });
     const stats = await sharp(result.buffer).stats();
     const means = stats.channels.map((c) => c.mean);
-    const golden = [133.65, 125.26, 106.29];
+    const golden = [135.41, 124.73, 103.68];
     means.forEach((mean, i) => {
       expect(mean).toBeGreaterThan(golden[i] - 3);
       expect(mean).toBeLessThan(golden[i] + 3);
@@ -118,6 +122,41 @@ describe('convertHeifToJpeg (wrapper, real fixture)', () => {
 
     expect(result.width).toBe(4284);
     expect(result.height).toBe(5712);
+  });
+});
+
+describe('hardening: sips failure (not just ENOENT) falls back to Node', () => {
+  // Simulates the documented case where `sips` is present but refuses a
+  // valid HDR gain-map HEIC (the auxiliary-image-reference limit) by
+  // shadowing `sips` on PATH with a script that always exits non-zero.
+  // Before the fix, any non-ENOENT sips failure was rethrown, defeating
+  // the fallback for exactly the files it exists to support.
+  let fakeSipsDir: string;
+  let originalPath: string | undefined;
+
+  beforeAll(async () => {
+    fakeSipsDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'fake-sips-'));
+    const fakeSipsPath = path.join(fakeSipsDir, 'sips');
+    await fsPromises.writeFile(
+      fakeSipsPath,
+      '#!/bin/sh\necho "too many auxiliary image references" >&2\nexit 1\n',
+    );
+    await fsPromises.chmod(fakeSipsPath, 0o755);
+    originalPath = process.env.PATH;
+    process.env.PATH = `${fakeSipsDir}:${originalPath ?? ''}`;
+  });
+
+  afterAll(async () => {
+    process.env.PATH = originalPath;
+    await fsPromises.rm(fakeSipsDir, { recursive: true, force: true });
+  });
+
+  test('convertHeifToJpeg still succeeds via the Node fallback when sips fails non-ENOENT', async () => {
+    const result = await convertHeifToJpeg(TMAP_FIXTURE, { quality: 90 });
+
+    expect(result.width).toBe(3024);
+    expect(result.height).toBe(3024);
+    expect(result.iccApplied).toBe(true);
   });
 });
 

@@ -15,7 +15,12 @@
  * (`heif_image_handle_get_color_profile_type` et al.) is broken and
  * reports "not present" even when a profile exists, so the ICC profile is
  * pulled directly out of the container's meta/iprp/ipco/ipma boxes
- * instead.
+ * instead. It is then spliced into the output JPEG as a raw APP2 marker
+ * (see `embedIccProfileInJpeg`) rather than handed to sharp's
+ * `withIccProfile()`, which performs a colour-managed transform from the
+ * (assumed sRGB) input to the target profile -- since the decoded pixels
+ * are already in the space the extracted profile describes, that would
+ * alter already-correct sample values instead of just tagging them.
  *
  * Why the sips/Node split exists at all: system libheif (what macOS
  * `sips` and sharp's bundled libvips use) can predate 1.18.0 and
@@ -24,11 +29,12 @@
  * by recent iPhone/Android cameras ("Too many auxiliary image
  * references"). `sips` is tried first on macOS for speed with no extra
  * deps; the Node fallback's bundled WASM `libheif-js` doesn't carry that
- * limit, so it also serves as the fallback wherever `sips` is
- * unavailable.
+ * limit, so it also serves as the fallback whenever `sips` is unavailable
+ * OR fails on a given input (including that documented limitation).
  */
 
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -77,9 +83,11 @@ async function assertWithinSizeBound(
  * Primary path: macOS `sips`, tried only when `input` is a file path —
  * feature-detected via `execFile`'s ENOENT (never a shell string, so
  * paths containing spaces or shell metacharacters pass through
- * unmangled). Fallback (non-macOS, `sips` missing, or `input` is a
- * Buffer): {@link convertHeifToJpegNode}. Any other `sips` failure (e.g.
- * a genuinely corrupt file on macOS) is rethrown unchanged.
+ * unmangled). Fallback (non-macOS, `sips` missing, `sips` fails for any
+ * reason -- including the documented auxiliary-image-reference limit on
+ * HDR gain-map files -- or `input` is a Buffer): {@link
+ * convertHeifToJpegNode}. If both paths fail, the thrown error includes
+ * both underlying failures.
  */
 export async function convertHeifToJpeg(
   input: string | Buffer,
@@ -89,34 +97,46 @@ export async function convertHeifToJpeg(
   const maxInputBytes = opts.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES;
   await assertWithinSizeBound(input, maxInputBytes);
 
+  let sipsError: Error | null = null;
   if (typeof input === 'string') {
-    const sipsResult = await tryConvertWithSips(input, quality);
-    if (sipsResult) return sipsResult;
+    const sipsOutcome = await tryConvertWithSips(input, quality);
+    if (sipsOutcome.result) return sipsOutcome.result;
+    sipsError = sipsOutcome.error;
   }
 
   try {
     return await convertHeifToJpegNode(input, { quality, maxInputBytes });
   } catch (nodeError) {
-    const reason =
+    const sipsReason =
       typeof input === 'string'
-        ? "'sips' is unavailable (non-macOS) and the Node fallback also failed"
-        : 'the Node fallback failed';
-    throw new Error(
-      `HEIF conversion failed: ${reason}. Original error: ${(nodeError as Error).message}`,
-    );
+        ? sipsError
+          ? `'sips' failed (${sipsError.message})`
+          : "'sips' is unavailable (non-macOS)"
+        : null;
+    const reasons = [sipsReason, `the Node fallback also failed: ${(nodeError as Error).message}`]
+      .filter(Boolean)
+      .join(' and ');
+    throw new Error(`HEIF conversion failed: ${reasons}.`);
   }
 }
 
+interface SipsOutcome {
+  result: ConvertHeifResult | null;
+  /** Non-null only when `sips` ran but failed for a reason other than being absent. */
+  error: Error | null;
+}
+
 /**
- * Try converting via macOS `sips`. Returns null when `sips` isn't present
- * (ENOENT) so the caller can fall back to the Node path; any other error
- * (e.g. a genuinely corrupt file) is rethrown unchanged.
+ * Try converting via macOS `sips`. Returns a null result when `sips`
+ * isn't present (ENOENT) or fails for any other reason (e.g. the
+ * documented auxiliary-image-reference limit, or a genuinely corrupt
+ * file) so the caller always falls back to the Node path; `error` carries
+ * the non-ENOENT failure for diagnostics if the Node path also fails.
  */
-async function tryConvertWithSips(
-  inputPath: string,
-  quality: number,
-): Promise<ConvertHeifResult | null> {
-  const outPath = path.join(os.tmpdir(), `heif-sips-${process.pid}-${Date.now()}.jpg`);
+async function tryConvertWithSips(inputPath: string, quality: number): Promise<SipsOutcome> {
+  // randomUUID (not just pid+timestamp) avoids output-path collisions
+  // between concurrent conversions in the same process.
+  const outPath = path.join(os.tmpdir(), `heif-sips-${process.pid}-${randomUUID()}.jpg`);
   try {
     await execFileAsync('sips', [
       '-s',
@@ -131,19 +151,22 @@ async function tryConvertWithSips(
     ]);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null;
+      return { result: null, error: null };
     }
-    throw error;
+    return { result: null, error: error as Error };
   }
 
   try {
     const buffer = await fs.readFile(outPath);
     const metadata = await sharp(buffer).metadata();
     return {
-      buffer,
-      width: metadata.width ?? 0,
-      height: metadata.height ?? 0,
-      iccApplied: Boolean(metadata.icc),
+      result: {
+        buffer,
+        width: metadata.width ?? 0,
+        height: metadata.height ?? 0,
+        iccApplied: Boolean(metadata.icc),
+      },
+      error: null,
     };
   } finally {
     await fs.rm(outPath, { force: true });
@@ -181,24 +204,52 @@ export async function convertHeifToJpegNode(
   const { width, height, data } = await decode({ buffer });
   const icc = extractIccFromHeif(buffer); // null for nclx-only files
 
-  let pipeline = sharp(Buffer.from(data.buffer, data.byteOffset, data.byteLength), {
+  const jpegBuffer = await sharp(Buffer.from(data.buffer, data.byteOffset, data.byteLength), {
     raw: { width, height, channels: 4 },
-  }).removeAlpha();
+  })
+    .removeAlpha()
+    .jpeg({ quality })
+    .toBuffer();
 
-  let iccTmp: string | null = null;
-  try {
-    if (icc) {
-      // sharp .withIccProfile() takes a filesystem path -- write the extracted
-      // profile to a tmpdir file rather than beside the source input.
-      iccTmp = path.join(os.tmpdir(), `heif-icc-${process.pid}-${Date.now()}.icc`);
-      await fs.writeFile(iccTmp, icc);
-      pipeline = pipeline.withIccProfile(iccTmp);
-    }
-    const outBuffer = await pipeline.jpeg({ quality }).toBuffer();
-    return { buffer: outBuffer, width, height, iccApplied: icc !== null };
-  } finally {
-    if (iccTmp) await fs.rm(iccTmp, { force: true });
+  const outBuffer = icc ? embedIccProfileInJpeg(jpegBuffer, icc) : jpegBuffer;
+  return { buffer: outBuffer, width, height, iccApplied: icc !== null };
+}
+
+const ICC_APP2_IDENTIFIER = Buffer.from('ICC_PROFILE\0', 'latin1');
+// Max APP2 marker segment size is 0xFFFF, which includes the 2-byte length
+// field itself (but not the 2-byte marker code) -- subtract the length
+// field, identifier, sequence number, and marker count to get the max ICC
+// payload per chunk.
+const MAX_ICC_CHUNK_BYTES = 0xffff - 2 - ICC_APP2_IDENTIFIER.length - 1 - 1;
+
+/**
+ * Embed an ICC profile into a JPEG buffer as APP2 marker segment(s),
+ * chunked per the ICC-in-JPEG convention (ICC.1:2010 Annex B) for
+ * profiles too large for a single marker segment. This splices the
+ * profile bytes in directly as metadata rather than asking sharp to
+ * `.withIccProfile()` it -- see the module-level doc comment for why.
+ */
+function embedIccProfileInJpeg(jpeg: Buffer, icc: Buffer): Buffer {
+  if (jpeg.length < 2 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+    throw new Error('Expected a JPEG buffer starting with the SOI marker');
   }
+
+  const chunkCount = Math.max(1, Math.ceil(icc.length / MAX_ICC_CHUNK_BYTES));
+  const segments: Buffer[] = [];
+  for (let i = 0; i < chunkCount; i++) {
+    const chunk = icc.subarray(i * MAX_ICC_CHUNK_BYTES, (i + 1) * MAX_ICC_CHUNK_BYTES);
+    const segmentLength = 2 + ICC_APP2_IDENTIFIER.length + 1 + 1 + chunk.length;
+    const header = Buffer.alloc(4 + ICC_APP2_IDENTIFIER.length + 2);
+    header.writeUInt8(0xff, 0);
+    header.writeUInt8(0xe2, 1);
+    header.writeUInt16BE(segmentLength, 2);
+    ICC_APP2_IDENTIFIER.copy(header, 4);
+    header.writeUInt8(i + 1, 4 + ICC_APP2_IDENTIFIER.length);
+    header.writeUInt8(chunkCount, 4 + ICC_APP2_IDENTIFIER.length + 1);
+    segments.push(header, chunk);
+  }
+
+  return Buffer.concat([jpeg.subarray(0, 2), ...segments, jpeg.subarray(2)]);
 }
 
 // ---- ISOBMFF box parser --------------------------------------------------
