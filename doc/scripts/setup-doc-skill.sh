@@ -74,6 +74,24 @@ fi
 # Use the main worktree path so symlinks survive worktree removal
 REPO_ROOT="$(git -C "$ROOT_DIR" worktree list | head -1 | awk '{print $1}')"
 
+# ROOT_DIR may be nested below the git root (e.g. a doc/ project inside a
+# larger monorepo, rather than create-zudo-doc scaffolded at the repo root).
+# REPO_ROOT points at the *main worktree*, which mirrors the current
+# worktree's directory layout, so re-deriving ROOT_DIR's path relative to its
+# own worktree and joining it onto REPO_ROOT gives the correct project root
+# even when this worktree is a linked worktree slated for removal.
+CURRENT_WORKTREE_ROOT="$(git -C "$ROOT_DIR" rev-parse --show-toplevel)"
+ROOT_DIR_REL="$(realpath --relative-to="$CURRENT_WORKTREE_ROOT" "$ROOT_DIR")"
+if [ "$ROOT_DIR_REL" = "." ]; then
+  REPO_ROOT_PROJECT_DIR="$REPO_ROOT"
+  PROJECT_BUILD_CMD="pnpm build"
+else
+  REPO_ROOT_PROJECT_DIR="$REPO_ROOT/$ROOT_DIR_REL"
+  # Nested project (e.g. doc/ inside a larger repo): scope pnpm to it
+  # explicitly — the outer repo's root `pnpm build` will not touch it.
+  PROJECT_BUILD_CMD="pnpm -C $ROOT_DIR_REL build"
+fi
+
 DOCS_DIR="$ROOT_DIR/src/content/docs"
 
 # Validate docs directory exists
@@ -145,12 +163,12 @@ generate_skill() {
 
   mkdir -p "$skill_dir"
 
-  ensure_symlink "$skill_dir/docs" "$REPO_ROOT/src/content/docs"
-  echo "  [$target] Created docs symlink -> $REPO_ROOT/src/content/docs"
+  ensure_symlink "$skill_dir/docs" "$REPO_ROOT_PROJECT_DIR/src/content/docs"
+  echo "  [$target] Created docs symlink -> $REPO_ROOT_PROJECT_DIR/src/content/docs"
 
   if [ "$HAS_JA" = "true" ]; then
-    ensure_symlink "$skill_dir/docs-ja" "$REPO_ROOT/src/content/docs-ja"
-    echo "  [$target] Created docs-ja symlink -> $REPO_ROOT/src/content/docs-ja"
+    ensure_symlink "$skill_dir/docs-ja" "$REPO_ROOT_PROJECT_DIR/src/content/docs-ja"
+    echo "  [$target] Created docs-ja symlink -> $REPO_ROOT_PROJECT_DIR/src/content/docs-ja"
   fi
 
   cat > "$skill_dir/SKILL.md" << SKILLEOF
@@ -167,7 +185,7 @@ argument-hint: "[-u|--update] [topic keyword, e.g., 'configuration', 'sidebar', 
 # $PROJECT_NAME Documentation Reference
 
 Look up documentation from the $PROJECT_NAME project for $assistant_label.
-Documentation base path: \`src/content/docs\` (relative to repo root)
+Documentation base path: \`src/content/docs\` (relative to the $PROJECT_NAME project root$( [ "$ROOT_DIR_REL" != "." ] && echo ", i.e. \`$ROOT_DIR_REL/src/content/docs\` from the outer repo root" ))
 
 ## Mode Detection
 
@@ -210,8 +228,11 @@ The user has new information and wants to add or update documentation in this re
    \`docs-ja/\` mirroring the English directory structure. Keep code blocks,
    Mermaid diagrams, and \`<HtmlPreview>\` blocks identical — only translate
    surrounding prose. Exception: pages with \`generated: true\` skip translation.
-6. **Format**: Run \`pnpm format:md\` to format the new/changed MDX files.
-7. **Verify**: Run \`pnpm build\` to confirm the site builds correctly.
+6. **Format**: If this project defines a markdown-formatting script or you have
+   one available (e.g. the \`/format-md\` Claude Code skill), run it on the
+   new/changed MDX files.
+7. **Verify**: Run \`$PROJECT_BUILD_CMD\` (from the repo root) to confirm the
+   site builds correctly.
 
 ## Documentation Structure
 
