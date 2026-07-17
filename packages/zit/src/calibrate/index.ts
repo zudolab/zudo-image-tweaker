@@ -106,16 +106,19 @@ async function tryHeicToTempJpeg(heicPath: string): Promise<string | null> {
     `zit-calibrate-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`,
   );
   try {
+    // Argument order matches the sibling /heif module (see heif/index.ts):
+    // all `-s` options first, then the input file, then `--out` last — the
+    // order documented in `man sips` (`sips [options] file... --out outfile`).
     await execFileAsync('sips', [
       '-s',
       'format',
       'jpeg',
-      heicPath,
-      '--out',
-      tempPath,
       '-s',
       'formatOptions',
       '95',
+      heicPath,
+      '--out',
+      tempPath,
     ]);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

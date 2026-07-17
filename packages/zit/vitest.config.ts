@@ -8,7 +8,9 @@ export default mergeConfig(
       globals: true,
       environment: 'node',
       include: ['src/**/*.test.ts'],
-      passWithNoTests: true,
+      // The suite has tests; an empty glob match (e.g. a broken include
+      // pattern after a refactor) must fail loudly, not silently pass.
+      passWithNoTests: false,
     },
   }),
 );

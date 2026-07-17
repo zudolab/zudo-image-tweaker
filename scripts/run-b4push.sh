@@ -27,7 +27,7 @@ fail() {
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # ── Step 1: Build ────────────────────────────────
-step "Step 1/3: Build (pnpm -r build)"
+step "Step 1/4: Build (pnpm -r build)"
 if (cd "$ROOT_DIR" && pnpm build); then
   pass "Build passed"
 else
@@ -35,7 +35,7 @@ else
 fi
 
 # ── Step 2: Tests ────────────────────────────────
-step "Step 2/3: Tests (pnpm -r test)"
+step "Step 2/4: Tests (pnpm -r test)"
 if (cd "$ROOT_DIR" && pnpm test); then
   pass "All tests passed"
 else
@@ -43,11 +43,19 @@ else
 fi
 
 # ── Step 3: Typecheck ────────────────────────────
-step "Step 3/3: Typecheck (pnpm -r typecheck)"
+step "Step 3/4: Typecheck (pnpm -r typecheck)"
 if (cd "$ROOT_DIR" && pnpm typecheck); then
   pass "Typecheck passed"
 else
   fail "Typecheck"
+fi
+
+# ── Step 4: Check pack ───────────────────────────
+step "Step 4/4: Check pack (scripts/check-pack.sh)"
+if (cd "$ROOT_DIR" && bash scripts/check-pack.sh); then
+  pass "Check pack passed"
+else
+  fail "Check pack"
 fi
 
 # ── Summary ──────────────────────────────────────
