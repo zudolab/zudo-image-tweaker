@@ -19,7 +19,13 @@ export interface RunResult {
 export interface RunOptions {
   /** Kill the subprocess if it hasn't exited after this many ms. @default 60000 */
   timeoutMs?: number;
-  /** Signal used to kill a timed-out subprocess. @default 'SIGTERM' */
+  /**
+   * Signal used to kill a timed-out subprocess. @default 'SIGKILL' — a
+   * binary that installs a SIGTERM handler (or otherwise ignores it) would
+   * defeat the timeout under SIGTERM; SIGKILL cannot be caught or ignored,
+   * so the timeout stays a hard bound regardless of the target's own
+   * signal handling.
+   */
   killSignal?: NodeJS.Signals;
 }
 
@@ -39,7 +45,7 @@ export async function run(
   args: string[],
   options: RunOptions = {},
 ): Promise<RunResult> {
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, killSignal = 'SIGTERM' } = options;
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, killSignal = 'SIGKILL' } = options;
   // Default execFile encoding yields string stdout/stderr.
   const { stdout, stderr } = await execFileAsync(command, args, {
     timeout: timeoutMs,

@@ -166,7 +166,10 @@ async function tryHeicToTempJpeg(heicPath: string, timeoutMs: number): Promise<s
         '--out',
         tempPath,
       ],
-      { timeout: timeoutMs, killSignal: 'SIGTERM' },
+      // SIGKILL (not SIGTERM) so a `sips` process that ignores or handles
+      // SIGTERM can't defeat the timeout (see variants/run.ts's RunOptions
+      // doc for the same reasoning).
+      { timeout: timeoutMs, killSignal: 'SIGKILL' },
     );
   } catch (error) {
     // A non-zero `sips` exit can still leave a partial `tempPath` on disk
