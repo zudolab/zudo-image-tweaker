@@ -1,0 +1,148 @@
+# release.yml
+#
+# Publishes @takazudo/zudo-image-tweaker (packages/zit — the only non-private
+# package in this workspace) on a v* tag push. The publish runs `npm publish`
+# directly from packages/zit/ — NOT `pnpm -r publish` — because pnpm 11's OIDC
+# token-exchange path 404s against npmjs and skips provenance (pnpm/pnpm#11513).
+# npm's classic-token `--provenance` on Node 24 (npm CLI >= 11.5.1) attaches a
+# Sigstore provenance attestation using the GitHub Actions OIDC token, without
+# requiring npmjs.com Trusted-Publishing configuration.
+#
+# IMPORTANT: npm classic tokens (including the old "Automation" type) were
+# revoked registry-wide in Dec 2025 and can no longer be created — see
+# https://github.blog/changelog/2025-12-09-npm-classic-tokens-revoked-session-based-auth-and-cli-token-management-now-available/
+# NPM_TOKEN must instead be a **granular access token** with "Bypass 2FA for
+# noninteractive automation" enabled (write tokens are capped at a 90-day
+# expiration by npm, so plan to rotate it): create one at
+# https://www.npmjs.com/settings/<user>/tokens/granular-access-tokens/new
+# scoped to this package with read+write publish permission. A token without
+# the 2FA-bypass flag fails unattended CI publish with an OTP/ENEEDAUTH error.
+#
+# ── dist-tag policy ──────────────────────────────────────────────────────────
+#   Tag matching *-next.*, *-beta.*, or *-rc.*  → npm dist-tag "next"
+#   All other v* tags                           → npm dist-tag "latest"
+# Prerelease consumers opt in with `pnpm add @takazudo/zudo-image-tweaker@next`.
+#
+# The pre-publish artifact gate is scripts/check-pack.sh — it packs the tree,
+# installs the tarball into a scratch project, and resolves the root import
+# plus every subpath export before npm publish ever runs. The same script also
+# runs in ci.yml on every PR.
+#
+# Action SHAs are pinned to immutable commits (OpenSSF best practice); the
+# trailing comment names the release for human readability.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build only; skip the npm publish step"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # id-token: write enables npm OIDC-attested provenance via --provenance.
+      # Each published tarball carries a signed attestation linking to this run.
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          # Node 24 ships npm CLI >= 11.5.1, required for `npm publish --provenance`.
+          # CI (ci.yml) also runs on Node 22 — the package engines floor — for tests.
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Determine dist-tag
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG" =~ -next\. ]] || [[ "$TAG" =~ -beta\. ]] || [[ "$TAG" =~ -rc\. ]]; then
+            DIST_TAG="next"
+          else
+            DIST_TAG="latest"
+          fi
+          echo "DIST_TAG=$DIST_TAG" >> "$GITHUB_ENV"
+          echo "Resolved dist-tag: $DIST_TAG (from ref: $GITHUB_REF)"
+
+      # Real publishes build via prepublishOnly (pnpm build) inside `npm publish`,
+      # so this explicit build runs only on dry_run — otherwise "Build only" would
+      # install, tag-resolve, and exit without ever exercising the build.
+      - name: Build (dry-run smoke test)
+        if: ${{ inputs.dry_run == true }}
+        run: pnpm -F @takazudo/zudo-image-tweaker build
+
+      # Pre-publish artifact gate: pack + install-test + resolve every subpath
+      # export. Runs on dry_run too, so a manual dispatch actually exercises it.
+      - name: Check pack (verify published artifact)
+        run: bash scripts/check-pack.sh
+
+      - name: DRY RUN — skip publish
+        if: ${{ inputs.dry_run == true }}
+        shell: bash
+        run: |
+          echo "DRY RUN — built and packed successfully; would have published with dist-tag '$DIST_TAG'."
+          echo "Set dry_run=false on a real v* tag push to publish."
+
+      # Guard: a manual workflow_dispatch on a branch (not a v* tag) must not
+      # accidentally publish. dry_run=true is the only safe way to exercise this
+      # workflow from a branch.
+      - name: Verify publish context (tag ref required)
+        if: ${{ inputs.dry_run != true }}
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF" =~ ^refs/tags/v ]]; then
+            echo "::error::Publish requires a v* tag ref. Got: $GITHUB_REF."
+            echo "::error::For manual smoke tests, re-run workflow_dispatch with dry_run=true."
+            exit 1
+          fi
+
+      # Guard: a mistyped tag (e.g. v0.2.0 cut from a commit whose
+      # package.json is still 0.1.0) must never publish — npm cannot
+      # re-publish a version, so a bad tag here would be irreversible.
+      - name: Verify tag matches package.json version
+        if: ${{ inputs.dry_run != true }}
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION=$(node -p "require('./packages/zit/package.json').version")
+          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+            echo "::error::Tag v$TAG_VERSION does not match packages/zit/package.json version ($PKG_VERSION). Refusing to publish."
+            exit 1
+          fi
+          echo "Tag version matches package.json: $PKG_VERSION"
+
+      - name: Publish to npm
+        if: ${{ inputs.dry_run != true && startsWith(github.ref, 'refs/tags/v') }}
+        # `npm publish --provenance` (not `pnpm -r publish`) — see the header comment.
+        # Run from the package dir so npm publishes the single public package.
+        run: cd packages/zit && npm publish --provenance --access public --tag "$DIST_TAG"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
