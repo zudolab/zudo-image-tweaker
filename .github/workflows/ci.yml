@@ -49,3 +49,10 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
+
+      # Real-artifact gate: pack -> npm i the tarball -> resolve the root import
+      # plus every subpath export as a real consumer would. Catches files[]/
+      # exports regressions that unit tests never touch. Also runs in
+      # release.yml immediately before the real npm publish.
+      - name: Check pack (verify published artifact)
+        run: bash scripts/check-pack.sh
