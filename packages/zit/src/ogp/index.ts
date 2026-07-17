@@ -1,4 +1,6 @@
-import { writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { rename, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import sharp from 'sharp';
 
 /** File path or in-memory buffer accepted as the compositor's source image. */
@@ -183,7 +185,20 @@ async function finalizeResult(
   };
 
   if (outPath) {
-    await writeFile(outPath, buffer);
+    // Atomic write: stage in a sibling temp file, then rename(2) over the
+    // target so a crash mid-write never leaves a truncated OGP image at the
+    // final path (which the variants engine's cache would treat as a hit).
+    const tmpPath = path.join(
+      path.dirname(outPath),
+      `.${path.basename(outPath)}.${randomUUID()}.tmp`,
+    );
+    try {
+      await writeFile(tmpPath, buffer);
+      await rename(tmpPath, outPath);
+    } catch (error) {
+      await rm(tmpPath, { force: true });
+      throw error;
+    }
     result.path = outPath;
   }
 

@@ -5,7 +5,7 @@ import { encodeImageToBlurhash } from '../blurhash/index.js';
 import { pickVariantWidths } from '../exif/index.js';
 import { convertHeifToJpeg } from '../heif/index.js';
 import { generateSmartOgp } from '../ogp/index.js';
-import { hashFile, readCache, writeCache, type CacheEntry } from './hash-cache.js';
+import { hashFile, readCache, writeAtomicVia, writeCache, type CacheEntry } from './hash-cache.js';
 import { isHeicSource, isNonImageFile } from './heic.js';
 import { isCorruptionError, repairCorruptedImage } from './repair.js';
 import { defaultTagParser } from './tags.js';
@@ -264,7 +264,12 @@ async function generateVariants(
       //   shift (strip-after-convert, not strip-and-mis-render).
       const pipeline = sharp(input).rotate().resize({ width, withoutEnlargement: true });
       if (!cfg.stripMetadata) pipeline.keepIccProfile();
-      const { size } = await applyFormat(pipeline, format, cfg.quality).toFile(outputPath);
+      // Atomic write: sharp encodes to a sibling temp path, then rename(2)
+      // lands it on outputPath — so a crash mid-encode never leaves a
+      // truncated variant that a later run would treat as a valid cache hit.
+      const { size } = await writeAtomicVia(outputPath, (tmpPath) =>
+        applyFormat(pipeline, format, cfg.quality).toFile(tmpPath),
+      );
       outputs.push({ width, format, filename, path: outputPath, size });
     }
   }
@@ -314,13 +319,33 @@ function expectedOutputs(
   return files;
 }
 
-async function allExist(dir: string, files: string[]): Promise<boolean> {
+/**
+ * A cache hit is only honoured when every expected output still exists AND
+ * its on-disk size matches the size recorded when it was written. The size
+ * check is what defends against a POISONED cache: a file truncated by a
+ * crash under an older, non-atomic version (or otherwise altered on disk)
+ * fails the comparison and forces a reprocess rather than serving corruption.
+ *
+ * A legacy entry written before sizes were recorded has `sizes === undefined`
+ * (or a filename missing from the map); that is treated as unverifiable and
+ * reprocessed once — the fresh run then records sizes for all future hits.
+ */
+async function outputsValid(
+  dir: string,
+  files: string[],
+  sizes: Record<string, number> | undefined,
+): Promise<boolean> {
+  if (!sizes) return false;
   for (const file of files) {
+    const expectedSize = sizes[file];
+    if (typeof expectedSize !== 'number') return false;
+    let stat;
     try {
-      await fs.access(path.join(dir, file));
+      stat = await fs.stat(path.join(dir, file));
     } catch {
       return false;
     }
+    if (stat.size !== expectedSize) return false;
   }
   return true;
 }
@@ -376,7 +401,7 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
       expected &&
       Array.isArray(cache.outputs) &&
       sameFileSet(expected, cache.outputs) &&
-      (await allExist(imageOutputDir, expected))
+      (await outputsValid(imageOutputDir, expected, cache.outputSizes))
     ) {
       if (cache.metadata) await cfg.onMetadata?.(cache.metadata);
       return {
@@ -441,6 +466,7 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
       mode,
       animated,
       outputs: [ogp.filename],
+      outputSizes: { [ogp.filename]: ogp.size },
       metadata: null,
     });
     return { ...base, status: 'processed', animated, variants: [], ogp, metadata: null };
@@ -449,11 +475,17 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
   let blurhash: string | null;
   let variants: VariantOutput[] = [];
   let ogp: OgpOutput | null = null;
+  let passthroughSize: number | null = null;
 
   if (animated) {
     blurhash = await tryBlurhash(processInput, slug, cfg.fallbackBlurhash);
     try {
-      await fs.copyFile(inputPath, path.join(imageOutputDir, passthroughName(inputPath)));
+      // Atomic passthrough: copy the original to a sibling temp path, then
+      // rename it into place — a crash mid-copy leaves no truncated original
+      // at the final path for a later run to serve as a cache hit.
+      const dest = path.join(imageOutputDir, passthroughName(inputPath));
+      await writeAtomicVia(dest, (tmpPath) => fs.copyFile(inputPath, tmpPath));
+      passthroughSize = (await fs.stat(dest)).size;
     } catch (error) {
       throw new VariantProcessingError('passthrough', error);
     }
@@ -541,8 +573,14 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     ...(ogp ? [ogp.filename] : []),
     ...(animated ? [passthroughName(inputPath)] : []),
   ];
+  const outputSizes: Record<string, number> = {};
+  for (const v of variants) outputSizes[v.filename] = v.size;
+  if (ogp) outputSizes[ogp.filename] = ogp.size;
+  if (animated && passthroughSize !== null) {
+    outputSizes[passthroughName(inputPath)] = passthroughSize;
+  }
   try {
-    await writeCache(cachePath, { hash: fileHash, configHash, mode, animated, outputs, metadata: record });
+    await writeCache(cachePath, { hash: fileHash, configHash, mode, animated, outputs, outputSizes, metadata: record });
   } catch (error) {
     throw new VariantProcessingError('cache', error);
   }
