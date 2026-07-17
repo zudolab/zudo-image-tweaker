@@ -256,4 +256,54 @@ describe('normalizeBackgroundColor', () => {
     const opaqueIdx = (5 * info.width + 5) * 4;
     expect(data[opaqueIdx + 3]).toBe(255);
   });
+
+  it('preserves a wide-gamut (Display-P3) ICC profile byte-identically (issue #35)', async () => {
+    const raw = buildRawImage(200, 200, solidColorAt(BG));
+    const p3Jpeg = await sharp(raw, { raw: { width: 200, height: 200, channels: 3 } })
+      .jpeg({ quality: 100 })
+      .withIccProfile('p3')
+      .toBuffer();
+    const sourceIcc = Buffer.from((await sharp(p3Jpeg).metadata()).icc!);
+
+    const result = await normalizeBackgroundColor(p3Jpeg, {
+      target: { r: 180, g: 80, b: 90 },
+      format: 'jpeg',
+    });
+
+    const outMeta = await sharp(result.buffer).metadata();
+    expect(outMeta.icc).toBeDefined();
+    expect(Buffer.from(outMeta.icc!).equals(sourceIcc)).toBe(true);
+  });
+
+  it('emits no ICC profile when the source carries none', async () => {
+    const raw = buildRawImage(200, 200, solidColorAt(BG));
+    const png = await toPng(raw, 200, 200);
+
+    const result = await normalizeBackgroundColor(png, { target: { r: 180, g: 80, b: 90 }, format: 'png' });
+
+    expect((await sharp(result.buffer).metadata()).icc).toBeUndefined();
+  });
+
+  it('rejects a non-positive or fractional patchSize instead of silently miscounting pixels', async () => {
+    const raw = buildRawImage(200, 200, solidColorAt(BG));
+    const png = await toPng(raw, 200, 200);
+    const target: RgbColor = { r: 180, g: 80, b: 90 };
+
+    await expect(normalizeBackgroundColor(png, { target, patchSize: 0 })).rejects.toThrow(/positive integer/i);
+    await expect(normalizeBackgroundColor(png, { target, patchSize: -5 })).rejects.toThrow(/positive integer/i);
+    await expect(normalizeBackgroundColor(png, { target, patchSize: 10.5 })).rejects.toThrow(/positive integer/i);
+  });
+
+  it('EXIF policy: EXIF is always dropped from the output (documented in the module/function JSDoc)', async () => {
+    const raw = buildRawImage(200, 200, solidColorAt(BG));
+    const jpeg = await sharp(raw, { raw: { width: 200, height: 200, channels: 3 } })
+      .withExif({ IFD0: { Make: 'ZitTestCamera' } })
+      .jpeg({ quality: 100 })
+      .toBuffer();
+    expect((await sharp(jpeg).metadata()).exif).toBeDefined();
+
+    const result = await normalizeBackgroundColor(jpeg, { target: { r: 180, g: 80, b: 90 }, format: 'jpeg' });
+
+    expect((await sharp(result.buffer).metadata()).exif).toBeUndefined();
+  });
 });
