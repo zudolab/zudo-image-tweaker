@@ -36,9 +36,11 @@ convention as placeholders and will 404 until that content ships.
 
 `@imgly/background-removal-node`, `exifr`, and `heic2any` are optional peer
 dependencies, dynamically imported only by the modules that need them
-(`product-photo`, `exif`, and `browser` respectively). Install them only if
-you use those modules. `/heif`'s HEIC decoder (`heic-decode`) is a regular
-dependency and is always installed.
+(`product-photo` uses `@imgly/background-removal-node`; `browser` uses both
+`exifr` and `heic2any`). Install them only if you use those modules. `/exif`
+has no optional peer dependency — it parses the raw EXIF buffer directly.
+`/heif`'s HEIC decoder (`heic-decode`) is a regular dependency and is always
+installed.
 
 ## Security notes
 
