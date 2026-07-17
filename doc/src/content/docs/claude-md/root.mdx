@@ -1,0 +1,54 @@
+---
+title: "/CLAUDE.md"
+description: "CLAUDE.md at /CLAUDE.md"
+sidebar_position: 1
+sidebar_label: "CLAUDE.md"
+generated: true
+---
+
+**Path:** `CLAUDE.md`
+
+# zudo-image-tweaker
+
+A pnpm 11 monorepo: a private workspace root plus `packages/zit/`, the
+published `@takazudo/zudo-image-tweaker` package.
+
+## Commands
+
+```sh
+pnpm install          # install all workspace dependencies
+pnpm build             # build all packages (pnpm -r --if-present build)
+pnpm test              # run all tests (pnpm -r --if-present test)
+pnpm typecheck          # type-check all packages
+pnpm b4push             # run build + test + typecheck, mirrors ci.yml
+```
+
+Scope any command to the package with `pnpm -F @takazudo/zudo-image-tweaker <script>`.
+
+## Docs site
+
+`doc/` is a standalone `create-zudo-doc` project, deliberately kept OUT of
+this pnpm workspace. Install and run it separately:
+
+```sh
+pnpm -C doc install
+pnpm -C doc dev
+```
+
+## Release
+
+Releases are cut with the `/l-make-release` Claude Code skill. The version
+source-of-truth is `packages/zit/package.json`; publish is tag-driven via
+`.github/workflows/release.yml` (`npm publish --provenance` on Node 24).
+
+## HARD RULE: package.json / lockfile are frozen
+
+`packages/zit/package.json` predeclares the full dependency set (all
+runtime deps, all optional peer deps, all devDependencies) and the full
+`exports` map for all eleven subpath modules, up front, in the scaffold.
+
+**Later module-implementation tasks must NOT edit `package.json` or
+`pnpm-lock.yaml`** — every dependency a module needs is already declared.
+If a module task believes it needs a new dependency, that is a signal to
+stop and flag it rather than adding it silently; the dependency set was a
+deliberate, reviewed decision made at scaffold time.
