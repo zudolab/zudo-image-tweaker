@@ -115,6 +115,15 @@ describe('blurhashToDataUri', () => {
     expect(metadata.width).toBe(8);
     expect(metadata.height).toBe(8);
   });
+
+  it('rejects a non-positive or fractional size with a named error', async () => {
+    const image = await syntheticImage();
+    const hash = await encodeImageToBlurhash(image);
+
+    await expect(blurhashToDataUri(hash, { size: 0 })).rejects.toThrow(/size must be a positive integer/);
+    await expect(blurhashToDataUri(hash, { size: -4 })).rejects.toThrow(/size must be a positive integer/);
+    await expect(blurhashToDataUri(hash, { size: 3.5 })).rejects.toThrow(/size must be a positive integer/);
+  });
 });
 
 describe('batchBlurhashToDataUri', () => {

@@ -116,6 +116,41 @@ describe('isNonImageFile', () => {
     expect(await isNonImageFile('/x/a.jpg')).toBe(true);
   });
 
+  it('flags a JSON API response saved as an image (application/json)', async () => {
+    fileSays('application/json');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(true);
+  });
+
+  it('flags an application/xml payload saved as an image', async () => {
+    fileSays('application/xml');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(true);
+  });
+
+  it('flags a JavaScript payload saved as an image', async () => {
+    fileSays('application/javascript');
+    expect(await isNonImageFile('/x/a.png')).toBe(true);
+  });
+
+  it('flags a +json structured-syntax type saved as an image', async () => {
+    fileSays('application/vnd.api+json');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(true);
+  });
+
+  it('flags a +xml structured-syntax type saved as an image', async () => {
+    fileSays('application/vnd.custom+xml');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(true);
+  });
+
+  it('does not flag application/octet-stream (a mis-sniffed binary may still be an image)', async () => {
+    fileSays('application/octet-stream');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(false);
+  });
+
+  it('does not flag application/pdf', async () => {
+    fileSays('application/pdf');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(false);
+  });
+
   it('passes a real image through', async () => {
     fileSays('image/jpeg');
     expect(await isNonImageFile('/x/a.jpg')).toBe(false);
