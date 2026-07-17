@@ -76,6 +76,21 @@ describe('bakeOrientation / stripExif', () => {
     expect(bakedMeta.height).toBe(width);
   });
 
+  it('bakeOrientation retains the ICC profile while still dropping the orientation tag (issue #71)', async () => {
+    const oriented = await sharp(await orientedFixture(6))
+      .withMetadata({ orientation: 6 })
+      .withIccProfile('p3')
+      .toBuffer();
+    const sourceIcc = Buffer.from((await sharp(oriented).metadata()).icc!);
+
+    const baked = await bakeOrientation(oriented);
+
+    const bakedMeta = await sharp(baked).metadata();
+    expect(bakedMeta.orientation).toBeUndefined();
+    expect(bakedMeta.icc).toBeDefined();
+    expect(Buffer.from(bakedMeta.icc!).equals(sourceIcc)).toBe(true);
+  });
+
   it('stripExif removes metadata without altering pixel orientation', async () => {
     const oriented = await orientedFixture(6);
 

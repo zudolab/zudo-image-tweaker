@@ -216,7 +216,20 @@ async function generateVariants(
     for (const format of cfg.formats) {
       const filename = cfg.outputName(width, format);
       const outputPath = path.join(imageOutputDir, filename);
+      // Colour management (issue #71), verified empirically on sharp 0.35.3
+      // with pixel-level probes on a Display-P3 fixture:
+      // - default: `keepIccProfile()` retains the source ICC profile with
+      //   the pixel values untouched, across the webp/jpeg/png/avif
+      //   encoders. This keeps a wide-gamut source (Display-P3 iPhone
+      //   photos, or the profile `/heif` deliberately embeds in its
+      //   HEIC→JPEG intermediate) rendering exactly as shot, with no
+      //   sRGB gamut clip.
+      // - stripMetadata: sharp's default pipeline honours the embedded
+      //   input profile — pixels are genuinely converted to sRGB and
+      //   emitted untagged, so stripping the profile introduces no colour
+      //   shift (strip-after-convert, not strip-and-mis-render).
       const pipeline = sharp(input).rotate().resize({ width, withoutEnlargement: true });
+      if (!cfg.stripMetadata) pipeline.keepIccProfile();
       const { size } = await applyFormat(pipeline, format, cfg.quality).toFile(outputPath);
       outputs.push({ width, format, filename, path: outputPath, size });
     }

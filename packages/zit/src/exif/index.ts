@@ -42,11 +42,19 @@ export function parseExifDate(buffer: Buffer | Uint8Array | null | undefined): D
 
 /**
  * Physically rotate/flip pixel data to match the source's EXIF `Orientation`
- * tag, then re-encode without metadata. Use this before serving an image so
- * viewers that ignore EXIF orientation still display it upright.
+ * tag, then re-encode without metadata — except the ICC profile, which is
+ * retained with the pixel values untouched (`keepIccProfile`). Use this
+ * before serving an image so viewers that ignore EXIF orientation still
+ * display it upright.
+ *
+ * Retaining the profile keeps this usable as a mid-pipeline step (issue
+ * #71): a downstream encode can still choose to carry the profile through
+ * or to drop it — sharp's default pipeline genuinely converts pixels to
+ * sRGB via the embedded profile before dropping it. Stripping the profile
+ * HERE would lock a wide-gamut source into an early sRGB conversion.
  */
 export async function bakeOrientation(input: SharpInput): Promise<Buffer> {
-  return sharp(input).rotate().toBuffer();
+  return sharp(input).rotate().keepIccProfile().toBuffer();
 }
 
 /**

@@ -138,9 +138,46 @@ export interface ProcessOneConfig {
   tagParser?: TagParser;
   /** Attempt to repair corrupt sources via magick/ffmpeg when available. @default true */
   autoRepair?: boolean;
-  /** Bake EXIF orientation into pixels (and drop metadata) before encoding. @default false */
+  /**
+   * Bake EXIF orientation into pixels before encoding. See the
+   * `stripMetadata` behavior matrix for the full metadata semantics.
+   * @default false
+   */
   bakeExifOrientation?: boolean;
-  /** Strip all metadata before encoding (subsumed by bakeExifOrientation). @default false */
+  /**
+   * Strip ALL metadata — including the ICC profile — before encoding
+   * (subsumes bakeExifOrientation).
+   *
+   * Behavior matrix for `stripMetadata` × `bakeExifOrientation` — what each
+   * combination means for the emitted variant files (issue #71):
+   *
+   * | stripMetadata | bakeExifOrientation | EXIF    | XMP     | ICC profile | pixel orientation    | colour handling                          |
+   * |---------------|---------------------|---------|---------|-------------|----------------------|------------------------------------------|
+   * | false         | false               | dropped | dropped | retained    | baked (encode-time)  | source-space pixels + profile carried    |
+   * | false         | true                | dropped | dropped | retained    | baked (pre-pipeline) | source-space pixels + profile carried    |
+   * | true          | false               | dropped | dropped | dropped     | baked (pre-pipeline) | pixels genuinely converted to sRGB first |
+   * | true          | true                | dropped | dropped | dropped     | baked (pre-pipeline) | pixels genuinely converted to sRGB first |
+   *
+   * - EXIF and XMP are always dropped: sharp strips them on every encode
+   *   unless explicitly asked to keep them, and this pipeline never asks.
+   *   The EXIF orientation tag is therefore never emitted; instead the
+   *   rotation/flip it describes is always physically baked into the
+   *   pixels — at encode time via the variant chain's `.rotate()` when both
+   *   flags are false, or up-front (before blurhash/OGP too) when either
+   *   flag is set.
+   * - With `stripMetadata: false`, the ICC profile is retained via sharp's
+   *   `keepIccProfile()`: pixel values stay in the source colour space and
+   *   the profile carries through byte-identically, so a Display-P3 photo
+   *   (every modern iPhone) keeps its full gamut and renders exactly as
+   *   shot in any colour-managed viewer.
+   * - With `stripMetadata: true`, the profile is stripped strictly
+   *   AFTER conversion, never instead of it: sharp 0.35.3's default
+   *   pipeline honours the embedded input profile and genuinely converts
+   *   the pixels to sRGB (verified pixel-level on a P3 fixture), so the
+   *   untagged output renders correctly — at the cost of clipping
+   *   wide-gamut colours to sRGB.
+   * @default false
+   */
   stripMetadata?: boolean;
   /** Invoked (and awaited) with each produced/cache-hit VariantMetadata record. */
   onMetadata?: (record: VariantMetadata) => void | Promise<void>;

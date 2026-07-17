@@ -222,6 +222,15 @@ export async function generateOgpImage(
     shadowOffsetY: opts.shadowOffsetY ?? DEFAULT_SHADOW_OFFSET_Y,
   };
 
+  // Colour management (issue #71): both `sharp(input)` decodes below rely
+  // on sharp 0.35.3's default behaviour of honouring the source's embedded
+  // ICC profile — pixels are genuinely converted to sRGB and the profile is
+  // dropped, so a Display-P3 photo composites and renders correctly as an
+  // untagged sRGB JPEG (verified pixel-level on a P3 fixture). Do NOT add
+  // `keepIccProfile()` to any stage here: on the final `.composite()` stage
+  // it re-tags the already-sRGB-converted card pixels with the source
+  // profile, which mis-renders (also verified).
+
   // 1. Blurred, desaturated cover-crop background.
   const background = await sharp(input)
     .rotate() // Auto-rotate based on EXIF orientation.
@@ -285,6 +294,12 @@ export async function generateOgpFromLandscape(
   const quality = opts.quality ?? DEFAULT_QUALITY;
   const progressive = opts.progressive ?? DEFAULT_PROGRESSIVE;
 
+  // Colour management (issue #71): like generateOgpImage, this relies on
+  // sharp's default input-profile handling — a Display-P3 source is
+  // genuinely converted to sRGB and emitted untagged, which renders
+  // correctly everywhere (verified pixel-level on a P3 fixture). Both OGP
+  // branches deliberately emit plain sRGB: social-card scrapers are the
+  // consumer, and untagged sRGB is the most robust encoding for them.
   const buffer = await sharp(input)
     .rotate() // Auto-rotate based on EXIF orientation.
     .resize(width, height, { fit: 'cover', position: 'center' })
