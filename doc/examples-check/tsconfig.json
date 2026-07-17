@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    // Maps the package's public subpaths straight at the BUILT dist output
+    // (packages/zit/dist/), so every example in this directory typechecks
+    // against the real shipped .d.ts files rather than the source or a
+    // hand-maintained copy. Requires `pnpm build` (root) to have run first.
+    // `sharp` is mapped into packages/zit's own node_modules because doc/ is
+    // deliberately kept out of the pnpm workspace (see doc/CLAUDE.md) and so
+    // never installs sharp itself — a few module d.ts files (square, exif)
+    // re-export sharp types (e.g. `Color`, `SharpInput`).
+    "paths": {
+      "@takazudo/zudo-image-tweaker": ["../../packages/zit/dist/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/variants": ["../../packages/zit/dist/variants/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/heif": ["../../packages/zit/dist/heif/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/ogp": ["../../packages/zit/dist/ogp/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/budget": ["../../packages/zit/dist/budget/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/square": ["../../packages/zit/dist/square/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/product-photo": ["../../packages/zit/dist/product-photo/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/calibrate": ["../../packages/zit/dist/calibrate/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/composite": ["../../packages/zit/dist/composite/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/blurhash": ["../../packages/zit/dist/blurhash/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/exif": ["../../packages/zit/dist/exif/index.d.ts"],
+      "@takazudo/zudo-image-tweaker/browser": ["../../packages/zit/dist/browser/index.d.ts"],
+      "sharp": ["../../packages/zit/node_modules/sharp"]
+    }
+  },
+  "include": ["*.ts"]
+}
