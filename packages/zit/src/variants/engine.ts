@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp, { type FormatEnum, type Metadata, type Sharp } from 'sharp';
 import { encodeImageToBlurhash } from '../blurhash/index.js';
-import { bakeOrientation, pickVariantWidths } from '../exif/index.js';
+import { pickVariantWidths } from '../exif/index.js';
 import { convertHeifToJpeg } from '../heif/index.js';
 import { generateSmartOgp } from '../ogp/index.js';
 import { hashFile, readCache, writeCache, type CacheEntry } from './hash-cache.js';
@@ -138,8 +138,11 @@ function isSafeSlug(slug: string): boolean {
 // Bump when the pipeline's output semantics change without any config
 // changing, so pre-change cache entries stop matching and outputs are
 // regenerated. v2: ICC colour management (issue #71) — variants produced
-// before it lack the retained profile.
-const PIPELINE_VERSION = 2;
+// before it lack the retained profile. v3: removed the redundant
+// pre-pipeline bakeOrientation re-encode (issue #29) — variants produced
+// under bakeExifOrientation/stripMetadata before it carry an extra
+// generation of JPEG loss.
+const PIPELINE_VERSION = 3;
 
 function fingerprintConfig(cfg: ResolvedConfig): string {
   return JSON.stringify({
@@ -150,7 +153,9 @@ function fingerprintConfig(cfg: ResolvedConfig): string {
     ogpFileName: cfg.ogpFileName,
     ogpOptions: cfg.ogpOptions,
     fallbackBlurhash: cfg.fallbackBlurhash ?? null,
-    bakeExifOrientation: cfg.bakeExifOrientation,
+    // bakeExifOrientation is deliberately NOT fingerprinted: it is a no-op
+    // (orientation is always baked at encode time, issue #29), so toggling
+    // it must keep the cache hit rather than regenerate identical outputs.
     stripMetadata: cfg.stripMetadata,
   });
 }
@@ -428,22 +433,23 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     }
   } else {
     // Run the decode-heavy stages together so a pixel-level corruption error
-    // from any of them (bake, variants, OGP) can trigger one repair of the
-    // original file and a single retry from the repaired bytes. Baking
-    // orientation via `/exif` also strips metadata, so stripMetadata routes
-    // through it too — stripping the EXIF tag without baking would leave a
-    // sideways image once the variant pipeline auto-orients.
+    // from any of them (blurhash, variants, OGP) can trigger one repair of
+    // the original file and a single retry from the repaired bytes.
+    // Orientation is never pre-baked here (issue #29): every consumer
+    // auto-orients from the source itself — the variant chain, blurhash,
+    // and OGP each call `.rotate()` — and sharp strips EXIF/XMP on every
+    // encode anyway, so a pre-bake would only add a redundant lossy
+    // re-encode ahead of the real one.
     // OGP is tagged with its own stage so a failure there is reported as
     // 'ogp', not 'variants' — but it still runs inside runPipeline so a
     // corruption that only surfaces at OGP shares the single repair+retry.
     const runPipeline = async (src: string | Buffer) => {
-      const oriented = cfg.bakeExifOrientation || cfg.stripMetadata ? await bakeOrientation(src) : src;
-      const bh = await tryBlurhash(oriented, slug, cfg.fallbackBlurhash);
-      const vs = await generateVariants(oriented, imageOutputDir, displayWidth, cfg);
+      const bh = await tryBlurhash(src, slug, cfg.fallbackBlurhash);
+      const vs = await generateVariants(src, imageOutputDir, displayWidth, cfg);
       let og: OgpOutput | null = null;
       if (mode === 'og') {
         try {
-          og = await generateOgp(oriented, imageOutputDir, cfg);
+          og = await generateOgp(src, imageOutputDir, cfg);
         } catch (error) {
           throw new VariantProcessingError('ogp', error);
         }
