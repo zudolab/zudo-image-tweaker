@@ -63,6 +63,11 @@ jobs:
       # id-token: write enables npm OIDC-attested provenance via --provenance.
       # Each published tarball carries a signed attestation linking to this run.
       id-token: write
+    outputs:
+      # Consumed by the smoke job below to know which version to poll for —
+      # read once here rather than re-deriving in a job that only has the
+      # installed (registry) copy of package.json to look at.
+      version: ${{ steps.pkg-version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -78,6 +83,13 @@ jobs:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
+
+      - name: Read package.json version
+        id: pkg-version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./packages/zit/package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -159,3 +171,101 @@ jobs:
         run: cd packages/zit && npm publish --provenance --access public --tag "$DIST_TAG"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Post-publish clean-room smoke (issue #56). `npm publish` above already
+  # happened and is irreversible — this job is a pure alerting guard, not a
+  # gate: it proves the artifact the registry now serves actually installs
+  # and resolves, the same way a real consumer would find out, instead of
+  # only trusting the pre-publish check-pack.sh run against the local pack.
+  # Skipped on dry_run (nothing was published) and on any publish failure.
+  smoke:
+    name: Post-publish smoke test
+    needs: publish
+    if: ${{ needs.publish.result == 'success' && inputs.dry_run != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+
+      - name: Install from registry and resolve every exports subpath
+        shell: bash
+        env:
+          PKG_NAME: "@takazudo/zudo-image-tweaker"
+          PKG_VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          set -euo pipefail
+          WORK_DIR=$(mktemp -d)
+          cd "$WORK_DIR"
+          npm init -y >/dev/null
+
+          # The registry can take a few seconds to serve a version that was
+          # just published, so poll with backoff instead of installing once.
+          echo "==> Polling registry for $PKG_NAME@$PKG_VERSION"
+          ATTEMPTS=10
+          for i in $(seq 1 "$ATTEMPTS"); do
+            if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+              echo "Registry serves $PKG_NAME@$PKG_VERSION (attempt $i/$ATTEMPTS)"
+              break
+            fi
+            if [ "$i" = "$ATTEMPTS" ]; then
+              echo "::error::registry never served $PKG_NAME@$PKG_VERSION after $ATTEMPTS attempts"
+              exit 1
+            fi
+            SLEEP=$((i * 5))
+            echo "Attempt $i/$ATTEMPTS: not yet available, retrying in ${SLEEP}s..."
+            sleep "$SLEEP"
+          done
+
+          echo "==> Installing $PKG_NAME@$PKG_VERSION from the registry"
+          npm i "$PKG_NAME@$PKG_VERSION" >/dev/null
+
+          INSTALLED_VERSION=$(node -p "require('./node_modules/$PKG_NAME/package.json').version")
+          if [ "$INSTALLED_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::version mismatch: expected $PKG_VERSION, installed $INSTALLED_VERSION"
+            exit 1
+          fi
+
+          # Derive subpaths from the exports map the registry actually
+          # shipped (not the local checkout), mirroring scripts/check-pack.sh.
+          SUBPATHS=$(node -p "Object.keys(require('./node_modules/$PKG_NAME/package.json').exports).join('\n')")
+
+          echo "==> Checking: every exports subpath resolves"
+          while IFS= read -r SUBPATH; do
+            [ -z "$SUBPATH" ] && continue
+
+            if [ "$SUBPATH" = "." ]; then
+              SPECIFIER="$PKG_NAME"
+            else
+              SPECIFIER="$PKG_NAME${SUBPATH#.}"
+            fi
+
+            if [ "$SUBPATH" = "./package.json" ]; then
+              RESOLVED_VERSION=$(node -p "require('$SPECIFIER').version")
+              if [ "$RESOLVED_VERSION" != "$PKG_VERSION" ]; then
+                echo "::error::$SPECIFIER resolved but version ($RESOLVED_VERSION) != $PKG_VERSION"
+                exit 1
+              fi
+              echo "OK: $SPECIFIER resolves (version $PKG_VERSION)"
+              continue
+            fi
+
+            node -e "
+              const specifier = process.argv[1];
+              import(specifier).then(() => {
+                // Resolution-only, same scope as check-pack.sh.
+              }).catch((err) => {
+                console.error('::error::failed to resolve', specifier);
+                console.error(err);
+                process.exit(1);
+              });
+            " "$SPECIFIER"
+            echo "OK: $SPECIFIER resolves"
+          done <<< "$SUBPATHS"
+
+          echo ""
+          echo "post-publish smoke: all checks passed for $PKG_NAME@$PKG_VERSION"
