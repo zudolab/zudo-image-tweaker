@@ -31,6 +31,33 @@ describe('hashFile', () => {
   });
 });
 
+describe('hashFile — hasher init retry', () => {
+  it('re-invokes xxhash on the next call after a failed init instead of poisoning the process', async () => {
+    // The memoized hasher promise must be cleared on rejection so a transient
+    // WASM init failure does not break hashFile for the rest of the process.
+    vi.resetModules();
+    const xxhashMock = vi.fn();
+    vi.doMock('xxhash-wasm', () => ({ default: xxhashMock }));
+
+    const file = path.join(tmpDir, 'h.bin');
+    await fsPromises.writeFile(file, 'payload');
+
+    const realXxhash = (await vi.importActual<typeof import('xxhash-wasm')>('xxhash-wasm')).default;
+    xxhashMock.mockRejectedValueOnce(new Error('wasm init boom'));
+    xxhashMock.mockImplementationOnce(() => realXxhash());
+
+    const { hashFile: freshHashFile } = await import('../hash-cache.js');
+
+    await expect(freshHashFile(file)).rejects.toThrow('wasm init boom');
+    // Second call must retry the init (not reuse the rejected memo) and succeed.
+    await expect(freshHashFile(file)).resolves.toMatch(/^[0-9a-f]+$/);
+    expect(xxhashMock).toHaveBeenCalledTimes(2);
+
+    vi.doUnmock('xxhash-wasm');
+    vi.resetModules();
+  });
+});
+
 describe('writeFileAtomic', () => {
   it('writes the target via a temp file + rename, leaving no temp residue', async () => {
     const renameSpy = vi.spyOn(fsPromises, 'rename');
@@ -65,6 +92,7 @@ describe('readCache / writeCache', () => {
       mode: 'full',
       animated: false,
       outputs: ['600w.webp', '900w.webp'],
+      outputSizes: { '600w.webp': 1234, '900w.webp': 5678 },
       metadata: {
         slug: 'x',
         blurhash: 'LEHV6nWB',

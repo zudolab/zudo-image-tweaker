@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import { hasFfmpeg, hasMagick } from './feature-detect.js';
-import { run } from './run.js';
+import { resolveBinaryPath, run } from './run.js';
 
 // sharp/libvips corruption signatures worth attempting a repair for
 // (matched case-insensitively). A message not on this list is a genuine
@@ -39,7 +39,7 @@ async function repairWith(
 ): Promise<Buffer | null> {
   const outputPath = path.join(os.tmpdir(), `zit-repair-${process.pid}-${randomUUID()}.jpg`);
   try {
-    await run(command, buildArgs(inputPath, outputPath));
+    await run(command, buildArgs(resolveBinaryPath(inputPath), outputPath));
     const buffer = await fs.readFile(outputPath);
     if (buffer.length > 0 && (await decodesCleanly(buffer))) {
       return buffer;

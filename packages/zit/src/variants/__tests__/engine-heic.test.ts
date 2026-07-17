@@ -27,7 +27,13 @@ beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'zit-heic-'));
   outputDir = path.join(dir, 'out');
   mockConvert.mockReset();
-  mockConvert.mockResolvedValue({ buffer: jpeg, width: 400, height: 400, iccApplied: false });
+  mockConvert.mockResolvedValue({
+    buffer: jpeg,
+    width: 400,
+    height: 400,
+    iccApplied: false,
+    converter: 'node',
+  });
 });
 
 describe('HEIC dispatch', () => {

@@ -34,6 +34,18 @@ on:
   push:
     branches:
       - main
+    # Only redeploy when the doc site (or this workflow itself) changed —
+    # otherwise every push to main (including packages/zit-only changes)
+    # redeploys the unchanged doc site (issue #69). Also covers CLAUDE.md and
+    # .claude/** at the repo root: doc/zfb.config.ts's claudeResources scans
+    # them (claudeDir: "../.claude", scanRoot: "..") to generate the
+    # /docs/claude-* pages, so a source-only edit there changes the built
+    # site even though it never touches doc/.
+    paths:
+      - 'doc/**'
+      - '.github/workflows/main-deploy.yml'
+      - 'CLAUDE.md'
+      - '.claude/**'
 
 concurrency:
   group: production-deploy

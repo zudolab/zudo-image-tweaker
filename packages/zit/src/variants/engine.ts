@@ -2,10 +2,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp, { type FormatEnum, type Metadata, type Sharp } from 'sharp';
 import { encodeImageToBlurhash } from '../blurhash/index.js';
-import { bakeOrientation, pickVariantWidths } from '../exif/index.js';
+import { pickVariantWidths } from '../exif/index.js';
 import { convertHeifToJpeg } from '../heif/index.js';
 import { generateSmartOgp } from '../ogp/index.js';
-import { hashFile, readCache, writeCache, type CacheEntry } from './hash-cache.js';
+import { hashFile, readCache, writeAtomicVia, writeCache, type CacheEntry } from './hash-cache.js';
 import { isHeicSource, isNonImageFile } from './heic.js';
 import { isCorruptionError, repairCorruptedImage } from './repair.js';
 import { defaultTagParser } from './tags.js';
@@ -20,6 +20,7 @@ import {
   type ItemResult,
   type OgpOutput,
   type OutputNameFn,
+  type ParsedTag,
   type ProcessFailure,
   type ProcessImagesConfig,
   type ProcessOneConfig,
@@ -49,6 +50,9 @@ export class VariantProcessingError extends Error {
     this.stage = stage;
   }
 }
+
+/** An {@link ImageEntry} whose optional `tag` is known to be resolved. */
+type TaggedEntry = ImageEntry & { tag: ParsedTag };
 
 interface ResolvedConfig {
   outputDir: string;
@@ -108,6 +112,36 @@ function passthroughName(inputPath: string): string {
 }
 
 /**
+ * Formats where `metadata.pages > 1` means animation frames, per format:
+ * - gif: multi-frame GIF (the original passthrough case).
+ * - webp: animated WebP — sharp decodes only the first frame on the still
+ *   path, so re-encoding would silently flatten it (issue #28).
+ * - png: APNG — same first-frame flattening on the still path.
+ * Multi-page formats where a page is a document, not a frame (TIFF, PDF),
+ * are deliberately excluded — those should go down the still path, which
+ * renders page one. Animated sources are passthrough-copied byte-for-byte
+ * (no width variants) rather than re-encoded.
+ *
+ * AVIF is deliberately NOT listed. Empirically, on the pinned sharp 0.35.3
+ * / libvips 8.18.3 stack a still AVIF is probed as `metadata.format ===
+ * 'heif'` (never 'avif') with `pages === 1` — so keying passthrough on
+ * 'avif' never matched, and every AVIF already took the still-variant path.
+ * Keying on 'heif' instead would make an AVIF's still-vs-animated routing
+ * hinge solely on the page count, which libvips can surface as `pages > 1`
+ * for a still AVIF carrying aux/gain-map layers — risking a silent,
+ * variants-less passthrough of a still image (the exact false-positive the
+ * review flagged). Until an animated-AVIF fixture exists to verify the
+ * boundary, still AVIFs are kept on the safe still-variant path (proven by
+ * the still-AVIF test in engine.test.ts); an animated AVIF sequence is
+ * first-frame flattened — a known limitation, not silent data loss.
+ */
+const ANIMATED_PAGE_FORMATS = new Set(['gif', 'webp', 'png']);
+
+function isAnimatedSource(metadata: Metadata): boolean {
+  return ANIMATED_PAGE_FORMATS.has(metadata.format ?? '') && (metadata.pages ?? 1) > 1;
+}
+
+/**
  * A slug must be a single, safe directory segment. This rejects `''`, `.`,
  * `..`, and anything containing a path separator or NUL — a filename like
  * `...jpg` otherwise parses to the slug `..`, which would escape outputDir.
@@ -135,15 +169,30 @@ function isSafeSlug(slug: string): boolean {
  * (`CacheEntry.outputs`), compared in the cache check — which also covers
  * that fallback filename.
  */
+// Bump when the pipeline's output semantics change without any config
+// changing, so pre-change cache entries stop matching and outputs are
+// regenerated. v2: ICC colour management (issue #71) — variants produced
+// before it lack the retained profile. v3: removed the redundant
+// pre-pipeline bakeOrientation re-encode (issue #29) — variants produced
+// under bakeExifOrientation/stripMetadata before it carry an extra
+// generation of JPEG loss. v4: animated WebP/APNG passthrough (issue
+// #28) — a pre-change cache for such a source records `animated: false`
+// plus a flattened-still manifest, so without the bump an unchanged source
+// stays a cache hit and never gets its passthrough copy.
+const PIPELINE_VERSION = 4;
+
 function fingerprintConfig(cfg: ResolvedConfig): string {
   return JSON.stringify({
+    pipelineVersion: PIPELINE_VERSION,
     quality: cfg.quality,
     widths: cfg.widths,
     formats: cfg.formats,
     ogpFileName: cfg.ogpFileName,
     ogpOptions: cfg.ogpOptions,
     fallbackBlurhash: cfg.fallbackBlurhash ?? null,
-    bakeExifOrientation: cfg.bakeExifOrientation,
+    // bakeExifOrientation is deliberately NOT fingerprinted: it is a no-op
+    // (orientation is always baked at encode time, issue #29), so toggling
+    // it must keep the cache hit rather than regenerate identical outputs.
     stripMetadata: cfg.stripMetadata,
   });
 }
@@ -156,7 +205,21 @@ function sameFileSet(a: string[], b: string[]): boolean {
   return sortedA.every((name, i) => name === sortedB[i]);
 }
 
+/**
+ * Output formats `applyFormat` accepts. The first five have tuned encoders;
+ * `tiff`/`gif` fall through to sharp's generic `toFormat`. A format outside
+ * this set is rejected with a clear error rather than cast blindly into
+ * sharp's `FormatEnum` — which would otherwise surface as an opaque sharp
+ * error deep in the encode instead of a named "unsupported format" failure.
+ */
+const SUPPORTED_OUTPUT_FORMATS = new Set(['webp', 'jpg', 'jpeg', 'png', 'avif', 'tiff', 'gif']);
+
 function applyFormat(pipeline: Sharp, format: string, quality: number): Sharp {
+  if (!SUPPORTED_OUTPUT_FORMATS.has(format)) {
+    throw new Error(
+      `unsupported output format "${format}" — expected one of ${[...SUPPORTED_OUTPUT_FORMATS].join(', ')}`,
+    );
+  }
   switch (format) {
     case 'webp':
       return pipeline.webp({ quality });
@@ -216,8 +279,26 @@ async function generateVariants(
     for (const format of cfg.formats) {
       const filename = cfg.outputName(width, format);
       const outputPath = path.join(imageOutputDir, filename);
+      // Colour management (issue #71), verified empirically on sharp 0.35.3
+      // with pixel-level probes on a Display-P3 fixture:
+      // - default: `keepIccProfile()` retains the source ICC profile with
+      //   the pixel values untouched, across the webp/jpeg/png/avif
+      //   encoders. This keeps a wide-gamut source (Display-P3 iPhone
+      //   photos, or the profile `/heif` deliberately embeds in its
+      //   HEIC→JPEG intermediate) rendering exactly as shot, with no
+      //   sRGB gamut clip.
+      // - stripMetadata: sharp's default pipeline honours the embedded
+      //   input profile — pixels are genuinely converted to sRGB and
+      //   emitted untagged, so stripping the profile introduces no colour
+      //   shift (strip-after-convert, not strip-and-mis-render).
       const pipeline = sharp(input).rotate().resize({ width, withoutEnlargement: true });
-      const { size } = await applyFormat(pipeline, format, cfg.quality).toFile(outputPath);
+      if (!cfg.stripMetadata) pipeline.keepIccProfile();
+      // Atomic write: sharp encodes to a sibling temp path, then rename(2)
+      // lands it on outputPath — so a crash mid-encode never leaves a
+      // truncated variant that a later run would treat as a valid cache hit.
+      const { size } = await writeAtomicVia(outputPath, (tmpPath) =>
+        applyFormat(pipeline, format, cfg.quality).toFile(tmpPath),
+      );
       outputs.push({ width, format, filename, path: outputPath, size });
     }
   }
@@ -267,21 +348,42 @@ function expectedOutputs(
   return files;
 }
 
-async function allExist(dir: string, files: string[]): Promise<boolean> {
+/**
+ * A cache hit is only honoured when every expected output still exists AND
+ * its on-disk size matches the size recorded when it was written. The size
+ * check is what defends against a POISONED cache: a file truncated by a
+ * crash under an older, non-atomic version (or otherwise altered on disk)
+ * fails the comparison and forces a reprocess rather than serving corruption.
+ *
+ * A legacy entry written before sizes were recorded has `sizes === undefined`
+ * (or a filename missing from the map); that is treated as unverifiable and
+ * reprocessed once — the fresh run then records sizes for all future hits.
+ */
+async function outputsValid(
+  dir: string,
+  files: string[],
+  sizes: Record<string, number> | undefined,
+): Promise<boolean> {
+  if (!sizes) return false;
   for (const file of files) {
+    const expectedSize = sizes[file];
+    if (typeof expectedSize !== 'number') return false;
+    let stat;
     try {
-      await fs.access(path.join(dir, file));
+      stat = await fs.stat(path.join(dir, file));
     } catch {
       return false;
     }
+    if (stat.size !== expectedSize) return false;
   }
   return true;
 }
 
 /**
  * Process a single image end-to-end: HEIC conversion, content-hash cache
- * check, corruption repair, blurhash, width variants (or animated-GIF
- * passthrough), and optional OGP — dispatched by the entry's tag.
+ * check, corruption repair, blurhash, width variants (or byte-for-byte
+ * passthrough for animated GIF/WebP/APNG — see ANIMATED_PAGE_FORMATS), and
+ * optional OGP — dispatched by the entry's tag.
  *
  * Throws {@link VariantProcessingError} on a genuine processing failure
  * (carrying the failing `stage`); returns a `skipped` result for a
@@ -307,7 +409,14 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
   // hit lets us skip before the costly work (HEIC decode, `file` sniff). A
   // config change (different quality, etc.) invalidates it even when the
   // source bytes are unchanged.
-  const fileHash = await hashFile(inputPath);
+  let fileHash: string;
+  try {
+    fileHash = await hashFile(inputPath);
+  } catch (error) {
+    // An unreadable source (ENOENT, EACCES) fails here, before any pipeline
+    // stage — tag it 'io' so it doesn't surface as a raw 'unknown' (#45).
+    throw new VariantProcessingError('io', error);
+  }
   const cache = await readCache(cachePath);
   // `cache.mode` gates on the tag pipeline too: a pre-`mode` (older-format)
   // entry has it undefined and so never matches, which safely forces a
@@ -321,7 +430,7 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
       expected &&
       Array.isArray(cache.outputs) &&
       sameFileSet(expected, cache.outputs) &&
-      (await allExist(imageOutputDir, expected))
+      (await outputsValid(imageOutputDir, expected, cache.outputSizes))
     ) {
       if (cache.metadata) await cfg.onMetadata?.(cache.metadata);
       return {
@@ -340,7 +449,11 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     return { ...base, status: 'skipped', reason: 'not-an-image', animated: false, variants: [], ogp: null, metadata: null };
   }
 
-  await fs.mkdir(imageOutputDir, { recursive: true });
+  try {
+    await fs.mkdir(imageOutputDir, { recursive: true });
+  } catch (error) {
+    throw new VariantProcessingError('io', error);
+  }
 
   let processInput: string | Buffer = inputPath;
   if (await isHeicSource(inputPath)) {
@@ -367,7 +480,7 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
   if (!displayWidth || !displayHeight) {
     throw new VariantProcessingError('probe', new Error(`could not determine dimensions for "${slug}"`));
   }
-  const animated = metadata.format === 'gif' && (metadata.pages ?? 1) > 1;
+  const animated = isAnimatedSource(metadata);
 
   if (mode === 'ogonly') {
     let ogp: OgpOutput;
@@ -382,6 +495,7 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
       mode,
       animated,
       outputs: [ogp.filename],
+      outputSizes: { [ogp.filename]: ogp.size },
       metadata: null,
     });
     return { ...base, status: 'processed', animated, variants: [], ogp, metadata: null };
@@ -390,11 +504,17 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
   let blurhash: string | null;
   let variants: VariantOutput[] = [];
   let ogp: OgpOutput | null = null;
+  let passthroughSize: number | null = null;
 
   if (animated) {
     blurhash = await tryBlurhash(processInput, slug, cfg.fallbackBlurhash);
     try {
-      await fs.copyFile(inputPath, path.join(imageOutputDir, passthroughName(inputPath)));
+      // Atomic passthrough: copy the original to a sibling temp path, then
+      // rename it into place — a crash mid-copy leaves no truncated original
+      // at the final path for a later run to serve as a cache hit.
+      const dest = path.join(imageOutputDir, passthroughName(inputPath));
+      await writeAtomicVia(dest, (tmpPath) => fs.copyFile(inputPath, tmpPath));
+      passthroughSize = (await fs.stat(dest)).size;
     } catch (error) {
       throw new VariantProcessingError('passthrough', error);
     }
@@ -408,22 +528,23 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     }
   } else {
     // Run the decode-heavy stages together so a pixel-level corruption error
-    // from any of them (bake, variants, OGP) can trigger one repair of the
-    // original file and a single retry from the repaired bytes. Baking
-    // orientation via `/exif` also strips metadata, so stripMetadata routes
-    // through it too — stripping the EXIF tag without baking would leave a
-    // sideways image once the variant pipeline auto-orients.
+    // from any of them (blurhash, variants, OGP) can trigger one repair of
+    // the original file and a single retry from the repaired bytes.
+    // Orientation is never pre-baked here (issue #29): every consumer
+    // auto-orients from the source itself — the variant chain, blurhash,
+    // and OGP each call `.rotate()` — and sharp strips EXIF/XMP on every
+    // encode anyway, so a pre-bake would only add a redundant lossy
+    // re-encode ahead of the real one.
     // OGP is tagged with its own stage so a failure there is reported as
     // 'ogp', not 'variants' — but it still runs inside runPipeline so a
     // corruption that only surfaces at OGP shares the single repair+retry.
     const runPipeline = async (src: string | Buffer) => {
-      const oriented = cfg.bakeExifOrientation || cfg.stripMetadata ? await bakeOrientation(src) : src;
-      const bh = await tryBlurhash(oriented, slug, cfg.fallbackBlurhash);
-      const vs = await generateVariants(oriented, imageOutputDir, displayWidth, cfg);
+      const bh = await tryBlurhash(src, slug, cfg.fallbackBlurhash);
+      const vs = await generateVariants(src, imageOutputDir, displayWidth, cfg);
       let og: OgpOutput | null = null;
       if (mode === 'og') {
         try {
-          og = await generateOgp(oriented, imageOutputDir, cfg);
+          og = await generateOgp(src, imageOutputDir, cfg);
         } catch (error) {
           throw new VariantProcessingError('ogp', error);
         }
@@ -448,7 +569,15 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
         if (error instanceof VariantProcessingError) throw error;
         throw new VariantProcessingError('variants', error);
       }
-      pipeline = await runPipeline(repaired);
+      // The retry gets the same stage mapping as the first attempt: without
+      // it a failure on the retried pipeline propagates untagged and lands
+      // as stage 'unknown' (#45).
+      try {
+        pipeline = await runPipeline(repaired);
+      } catch (retryError) {
+        if (retryError instanceof VariantProcessingError) throw retryError;
+        throw new VariantProcessingError('variants', retryError);
+      }
     }
     ({ blurhash, variants, ogp } = pipeline);
   }
@@ -473,8 +602,14 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     ...(ogp ? [ogp.filename] : []),
     ...(animated ? [passthroughName(inputPath)] : []),
   ];
+  const outputSizes: Record<string, number> = {};
+  for (const v of variants) outputSizes[v.filename] = v.size;
+  if (ogp) outputSizes[ogp.filename] = ogp.size;
+  if (animated && passthroughSize !== null) {
+    outputSizes[passthroughName(inputPath)] = passthroughSize;
+  }
   try {
-    await writeCache(cachePath, { hash: fileHash, configHash, mode, animated, outputs, metadata: record });
+    await writeCache(cachePath, { hash: fileHash, configHash, mode, animated, outputs, outputSizes, metadata: record });
   } catch (error) {
     throw new VariantProcessingError('cache', error);
   }
@@ -484,7 +619,18 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
 }
 
 async function collectFiles(config: ProcessImagesConfig): Promise<string[]> {
+  // Dedupe by resolved path (first occurrence wins): `files` is documented
+  // as usable "in addition to scanning inputDir", so the same file reachable
+  // via both must process once — not trip the duplicate-slug guard (#46).
+  // True slug collisions between DIFFERENT files still fail downstream.
+  const seen = new Set<string>();
   const files: string[] = [];
+  const add = (filePath: string): void => {
+    const resolved = path.resolve(filePath);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    files.push(filePath);
+  };
   if (config.inputDir) {
     const inputDir = config.inputDir;
     let names: string[];
@@ -496,10 +642,10 @@ async function collectFiles(config: ProcessImagesConfig): Promise<string[]> {
       });
     }
     for (const name of names.sort()) {
-      if (IMAGE_EXTENSION_REGEX.test(name)) files.push(path.join(inputDir, name));
+      if (IMAGE_EXTENSION_REGEX.test(name)) add(path.join(inputDir, name));
     }
   }
-  if (config.files) files.push(...config.files);
+  if (config.files) for (const filePath of config.files) add(filePath);
   return files;
 }
 
@@ -569,7 +715,11 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
   // Parse each filename's tag inside the collect-and-continue path: a custom
   // tagParser that throws for one file records a 'slug'-stage failure and
   // keeps going, rather than rejecting the whole batch.
-  const entries: ImageEntry[] = [];
+  //
+  // Every entry here is built WITH a resolved tag, so it's typed `TaggedEntry`
+  // — the invariant the downstream `.tag` reads rely on is encoded in the
+  // type rather than asserted away with `!`.
+  const entries: TaggedEntry[] = [];
   let tagParseFailed = false;
   for (const inputPath of paths) {
     try {
@@ -589,14 +739,14 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
   // directory (and thrash each other's cache on later runs), so any slug
   // claimed by more than one input is rejected up front rather than
   // processed non-deterministically.
-  const bySlug = new Map<string, ImageEntry[]>();
+  const bySlug = new Map<string, TaggedEntry[]>();
   for (const entry of entries) {
-    const group = bySlug.get(entry.tag!.slug);
+    const group = bySlug.get(entry.tag.slug);
     if (group) group.push(entry);
-    else bySlug.set(entry.tag!.slug, [entry]);
+    else bySlug.set(entry.tag.slug, [entry]);
   }
 
-  const unique: ImageEntry[] = [];
+  const unique: TaggedEntry[] = [];
   for (const [slug, group] of bySlug) {
     if (group.length === 1) {
       unique.push(group[0]);
@@ -632,7 +782,7 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
   // that case rather than risk deleting that input's still-backed outputs.
   const removed =
     config.cleanupOrphans && !tagParseFailed
-      ? await cleanupOrphans(cfg.outputDir, new Set(entries.map((e) => e.tag!.slug)))
+      ? await cleanupOrphans(cfg.outputDir, new Set(entries.map((e) => e.tag.slug)))
       : [];
 
   return { results, failed, removed };

@@ -1,0 +1,14 @@
+# dependabot.yml
+#
+# Keeps the pinned action SHAs in .github/workflows/*.yml current (issue
+# #58). github-actions only, weekly — no npm ecosystem entry: this
+# workspace's package.json / pnpm-lock.yaml are frozen (see root
+# CLAUDE.md's HARD RULE), so Dependabot must not propose npm dependency
+# bumps here.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

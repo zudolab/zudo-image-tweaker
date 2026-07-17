@@ -11,9 +11,20 @@
  *    need no further EXIF-orientation handling downstream.
  * 4. Decode the final bytes once to measure width/height.
  *
+ * ## Optional peer dependencies
+ *
  * `exifr` and `heic2any` are optional peer dependencies and are always
  * dynamic-imported so this subpath never forces them into a consumer's
- * bundle unless the pipeline actually runs.
+ * bundle unless the pipeline actually runs:
+ *
+ * - `exifr` enables EXIF reading — both the capture date (`takenAt`) and the
+ *   orientation-bake guarantee. If it isn't installed the pipeline throws
+ *   {@link MISSING_EXIFR_MESSAGE} rather than silently dropping metadata and
+ *   shipping images the decoder still has to rotate on display.
+ * - `heic2any` enables HEIC/HEIF decoding in the browser. If it isn't
+ *   installed and a HEIC/HEIF file is submitted, the pipeline throws
+ *   {@link MISSING_HEIC2ANY_MESSAGE} rather than misreporting the absence as a
+ *   generic decode failure.
  */
 
 import { deriveOrientation, type Orientation } from './orientation.js';
@@ -22,11 +33,66 @@ import { needsOrientationBake } from './exif-orientation.js';
 const HEIC_MIME = /^image\/(heic|heif)$/i;
 const HEIC_EXT = /\.(heic|heif)$/i;
 
+/**
+ * Conservative default cap on the pixel area of the bake canvas.
+ *
+ * Safari/iOS historically refuse to allocate canvases beyond ~16.7M pixels
+ * (≈4096×4096 on older devices) and, rather than throwing, hand back a
+ * silently blank canvas — so an uncapped full-resolution bake produces empty
+ * output on exactly the devices that need orientation baking most. We downscale
+ * to fit this budget instead. Override via `maxCanvasArea` when the target
+ * environment is known to allow more.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/HTML/Element/canvas#maximum_canvas_size
+ */
+export const DEFAULT_MAX_CANVAS_AREA = 4096 * 4096;
+
+/**
+ * Thrown when a HEIC/HEIF file is submitted but the optional `heic2any` peer
+ * dependency is not installed. Exported so callers/tests can assert against the
+ * wording without duplicating it.
+ */
+export const MISSING_HEIC2ANY_MESSAGE = 'Install heic2any to decode HEIC in the browser';
+
+/**
+ * Thrown when the pipeline needs to read EXIF (always) but the optional `exifr`
+ * peer dependency is not installed. `exifr` is required for every image — the
+ * capture date is read even for plain JPEGs that need no orientation bake — so
+ * the message names EXIF reading, not just baking. Exported so callers/tests
+ * can assert against the wording without duplicating it.
+ */
+export const MISSING_EXIFR_MESSAGE =
+  'Install exifr to enable EXIF reading (capture date + orientation baking)';
+
+/**
+ * Marks an error as "a required optional peer dependency is missing" so the
+ * pipeline can distinguish it from an ordinary runtime failure (e.g. a HEIC
+ * file `heic2any` is present for but cannot parse). Missing-peer errors always
+ * propagate; ordinary failures may fall back gracefully.
+ */
+class MissingPeerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MissingPeerError';
+  }
+}
+
 export interface PrepareImageForUploadOptions {
   /** JPEG quality (0-1) used when transcoding HEIC/HEIF to JPEG. Default 0.9. */
   heicQuality?: number;
-  /** JPEG quality (0-1) used when re-encoding after an orientation bake. Ignored for lossless output types. Default 0.92. */
+  /**
+   * Quality (0-1) used when re-encoding after an orientation bake. Applies to
+   * every lossy output type this pipeline can emit — JPEG and WebP alike.
+   * Default 0.92.
+   */
   bakeQuality?: number;
+  /**
+   * Maximum pixel area (width × height) of the bake canvas. Inputs larger than
+   * this are downscaled to fit before baking, so oversized images produce a
+   * correctly-downscaled result instead of Safari's silently-blank output.
+   * Default {@link DEFAULT_MAX_CANVAS_AREA}.
+   */
+  maxCanvasArea?: number;
 }
 
 export interface PreparedImage {
@@ -44,8 +110,46 @@ function isHeic(file: File): boolean {
   return HEIC_MIME.test(file.type) || HEIC_EXT.test(file.name);
 }
 
+/** File-name base (everything before the final extension), or the whole name if it has none. */
+function stripExtension(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+const MIME_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+};
+
+function extensionForMime(mime: string): string {
+  return MIME_EXTENSIONS[mime.toLowerCase()] ?? 'bin';
+}
+
+/**
+ * Wrap a produced blob as a named `File` whose extension matches its ACTUAL
+ * MIME type. The original file's name base is preserved; the extension is
+ * derived by sniffing the blob's own `type` (never the requested output type),
+ * so Safari's silent WebP→PNG substitution can't leave a `.webp` name on PNG
+ * bytes. The original `File` is returned untouched when the pipeline produced
+ * no new bytes.
+ */
+function toNamedFile(produced: File | Blob, originalName: string): File | Blob {
+  if (produced instanceof File) return produced;
+  const mime = produced.type || 'application/octet-stream';
+  const name = `${stripExtension(originalName)}.${extensionForMime(mime)}`;
+  return new File([produced], name, { type: mime });
+}
+
 async function transcodeHeicToJpeg(file: File, quality: number): Promise<Blob> {
-  const { default: heic2any } = await import('heic2any');
+  let heic2any: typeof import('heic2any').default;
+  try {
+    ({ default: heic2any } = await import('heic2any'));
+  } catch {
+    throw new MissingPeerError(MISSING_HEIC2ANY_MESSAGE);
+  }
   const result = await heic2any({ blob: file, toType: 'image/jpeg', quality });
   // heic2any may return Blob | Blob[] depending on the input.
   return Array.isArray(result) ? result[0] : result;
@@ -61,8 +165,15 @@ async function readExif(
   blob: Blob,
   includeOrientation: boolean,
 ): Promise<{ takenAt: Date | null; exifOrientation: number | undefined }> {
+  let exifr: typeof import('exifr');
   try {
-    const exifr = await import('exifr');
+    exifr = await import('exifr');
+  } catch {
+    // A missing peer is a configuration error, not a per-file EXIF quirk —
+    // surface it loudly instead of silently disabling orientation baking.
+    throw new MissingPeerError(MISSING_EXIFR_MESSAGE);
+  }
+  try {
     const pick = includeOrientation
       ? ['DateTimeOriginal', 'CreateDate', 'ModifyDate', 'Orientation']
       : ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
@@ -129,25 +240,48 @@ async function decodeDimensions(blob: Blob): Promise<{ width: number; height: nu
  * rotate/flip math to `createImageBitmap(..., { imageOrientation:
  * 'from-image' })`, which every evergreen browser implements — this avoids
  * hand-rolling the 8-case EXIF orientation matrix ourselves.
+ *
+ * The canvas is capped to `maxCanvasArea` pixels: above Safari/iOS canvas
+ * limits an uncapped canvas comes back silently blank, so oversized inputs are
+ * downscaled to fit. After encoding, the canvas is shrunk to 0×0 to hint the
+ * (potentially large) backing store can be released promptly.
  */
 async function bakeOrientation(
   blob: Blob,
   outputMime: string,
   quality: number,
+  maxCanvasArea: number,
 ): Promise<{ blob: Blob; width: number; height: number }> {
   const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
   try {
+    let targetWidth = bitmap.width;
+    let targetHeight = bitmap.height;
+    const area = targetWidth * targetHeight;
+    if (area > maxCanvasArea) {
+      const scale = Math.sqrt(maxCanvasArea / area);
+      targetWidth = Math.max(1, Math.floor(targetWidth * scale));
+      targetHeight = Math.max(1, Math.floor(targetHeight * scale));
+    }
+
     const canvas = document.createElement('canvas');
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('2D canvas context is unavailable');
-    ctx.drawImage(bitmap, 0, 0);
-    // Preserve lossless output types; everything else re-encodes as JPEG.
+    ctx.drawImage(bitmap, 0, 0, targetWidth, targetHeight);
+    // JPEG and WebP are both lossy encoders that honour `quality`; PNG (and
+    // anything unknown) ignores it. Note Safari may silently substitute PNG
+    // when asked for WebP — the produced blob's own `type` is the source of
+    // truth for the output MIME, not this requested value.
     const mime = outputMime === 'image/png' || outputMime === 'image/webp' ? outputMime : 'image/jpeg';
     const outBlob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, quality));
     if (!outBlob) throw new Error('Canvas toBlob produced no data');
-    return { blob: outBlob, width: canvas.width, height: canvas.height };
+    const width = canvas.width;
+    const height = canvas.height;
+    // Release the backing store: a full-resolution canvas can hold tens of MB.
+    canvas.width = 0;
+    canvas.height = 0;
+    return { blob: outBlob, width, height };
   } finally {
     bitmap.close();
   }
@@ -159,8 +293,11 @@ export async function prepareImageForUpload(
 ): Promise<PreparedImage> {
   const heicQuality = opts.heicQuality ?? 0.9;
   const bakeQuality = opts.bakeQuality ?? 0.92;
+  const maxCanvasArea = opts.maxCanvasArea ?? DEFAULT_MAX_CANVAS_AREA;
 
-  // Step 1 — HEIC -> JPEG with graceful fallback to raw bytes.
+  // Step 1 — HEIC -> JPEG with graceful fallback to raw bytes. A missing
+  // `heic2any` peer is NOT a graceful case: rethrow it so the caller gets a
+  // named, actionable error instead of a misattributed decode failure below.
   const fileIsHeic = isHeic(file);
   let blob: File | Blob = file;
   let transcodedFromHeic = false;
@@ -168,7 +305,8 @@ export async function prepareImageForUpload(
     try {
       blob = await transcodeHeicToJpeg(file, heicQuality);
       transcodedFromHeic = true;
-    } catch {
+    } catch (err) {
+      if (err instanceof MissingPeerError) throw err;
       // Keep raw HEIC bytes; the decode step below surfaces a clear error
       // if the browser also can't decode them.
     }
@@ -190,7 +328,7 @@ export async function prepareImageForUpload(
   let height: number;
   try {
     if (orientationBakeNeeded) {
-      const baked = await bakeOrientation(blob, file.type, bakeQuality);
+      const baked = await bakeOrientation(blob, file.type, bakeQuality, maxCanvasArea);
       finalBlob = baked.blob;
       width = baked.width;
       height = baked.height;
@@ -221,7 +359,9 @@ export async function prepareImageForUpload(
   }
 
   return {
-    file: finalBlob,
+    // Preserve the source name base and give the output an extension that
+    // matches its ACTUAL MIME. Unchanged originals pass through untouched.
+    file: toNamedFile(finalBlob, file.name),
     width,
     height,
     takenAt,

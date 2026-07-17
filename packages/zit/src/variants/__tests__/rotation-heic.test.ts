@@ -26,7 +26,10 @@ const EXPECTED_WIDTH = 4284;
 const EXPECTED_HEIGHT = 5712;
 
 describe('rotation regression (real HEIC fixture, engine-level)', () => {
-  it('converts, orients, and emits variants at the fixture-derived portrait dimensions', async () => {
+  // A full 5712px WASM HEIC decode plus two variant encodes runs close to
+  // vitest's 5s default under full-suite parallel load — not a hang guard
+  // worth flaking over.
+  it('converts, orients, and emits variants at the fixture-derived portrait dimensions', { timeout: 30_000 }, async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'zit-rotation-'));
     try {
       const inputPath = path.join(dir, 'rotated.heic');

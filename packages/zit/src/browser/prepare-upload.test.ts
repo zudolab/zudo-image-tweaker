@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import heic2any from 'heic2any';
 import * as exifr from 'exifr';
@@ -268,14 +267,15 @@ describe('prepareImageForUpload', () => {
       const result = await prepareImageForUpload(file);
 
       expect(createImageBitmapMock).toHaveBeenCalledWith(file, { imageOrientation: 'from-image' });
-      expect(fakeCanvas.width).toBe(3000);
-      expect(fakeCanvas.height).toBe(4000);
       expect(result.width).toBe(3000);
       expect(result.height).toBe(4000);
       expect(result.orientation).toBe('portrait');
       expect(result.file).not.toBe(file);
       expect(result.file).toBeInstanceOf(Blob);
       expect(bitmap.close).toHaveBeenCalled();
+      // Canvas backing store is released after the bake (dims zeroed).
+      expect(fakeCanvas.width).toBe(0);
+      expect(fakeCanvas.height).toBe(0);
     });
 
     it('requests raw (untranslated) EXIF values, since exifr defaults to human-readable orientation strings', async () => {
@@ -337,6 +337,95 @@ describe('prepareImageForUpload', () => {
       await prepareImageForUpload(makeJpegFile(), { bakeQuality: 0.5 });
 
       expect(toBlobSpy).toHaveBeenCalledWith(expect.any(Function), 'image/jpeg', 0.5);
+    });
+  });
+
+  describe('canvas area cap (oversized bake input)', () => {
+    it('downscales an oversized bitmap to fit maxCanvasArea instead of producing a blank canvas', async () => {
+      mockedExifrParse.mockResolvedValue({ Orientation: 6 });
+      // 40×40 = 1600px input, capped to 100px → scale 0.25 → 10×10.
+      const bitmap = new FakeImageBitmap(40, 40);
+      vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue(bitmap));
+      const fakeCanvas = new FakeCanvas();
+      const drawImageSpy = vi.spyOn(
+        fakeCanvas.getContext('2d') as unknown as FakeCanvasRenderingContext2D,
+        'drawImage',
+      );
+      stubCanvas(fakeCanvas);
+
+      const result = await prepareImageForUpload(makeJpegFile(), { maxCanvasArea: 100 });
+
+      expect(result.width).toBe(10);
+      expect(result.height).toBe(10);
+      // Bitmap is drawn scaled to the capped target size, not its native size.
+      expect(drawImageSpy).toHaveBeenCalledWith(bitmap, 0, 0, 10, 10);
+    });
+
+    it('leaves dimensions untouched when the bitmap already fits the cap', async () => {
+      mockedExifrParse.mockResolvedValue({ Orientation: 6 });
+      const bitmap = new FakeImageBitmap(30, 40);
+      vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue(bitmap));
+      stubCanvas(new FakeCanvas());
+
+      const result = await prepareImageForUpload(makeJpegFile(), { maxCanvasArea: 1_000_000 });
+
+      expect(result.width).toBe(30);
+      expect(result.height).toBe(40);
+    });
+  });
+
+  describe('output name / MIME coherence', () => {
+    it('names a transcoded HEIC result with the source base and a .jpg extension matching its JPEG MIME', async () => {
+      mockedHeic2any.mockResolvedValue(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+      vi.stubGlobal('Image', DecodingImage);
+
+      const result = await prepareImageForUpload(makeHeicFile('IMG_1234.heic'));
+
+      expect(result.file).toBeInstanceOf(File);
+      expect((result.file as File).name).toBe('IMG_1234.jpg');
+      expect((result.file as File).type).toBe('image/jpeg');
+    });
+
+    it('gives a baked result a .jpg name matching the produced JPEG MIME', async () => {
+      mockedExifrParse.mockResolvedValue({ Orientation: 6 });
+      vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue(new FakeImageBitmap(300, 400)));
+      stubCanvas(new FakeCanvas());
+
+      const result = await prepareImageForUpload(makeJpegFile('vacation.jpg'));
+
+      expect(result.file).toBeInstanceOf(File);
+      expect((result.file as File).name).toBe('vacation.jpg');
+      expect((result.file as File).type).toBe('image/jpeg');
+    });
+
+    it('follows Safari WebP→PNG substitution: extension tracks the produced blob type, not the requested one', async () => {
+      mockedExifrParse.mockResolvedValue({ Orientation: 6 });
+      vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue(new FakeImageBitmap(300, 400)));
+      // Safari, asked for WebP, silently produces PNG. The canvas ignores the
+      // requested type and always hands back a PNG blob.
+      class PngSubstitutingCanvas extends FakeCanvas {
+        override toBlob(callback: BlobCallback) {
+          callback(new Blob([new Uint8Array([1])], { type: 'image/png' }));
+        }
+      }
+      stubCanvas(new PngSubstitutingCanvas());
+
+      // A .webp source drives the bake's requested output MIME to image/webp.
+      const webpFile = new File([new Uint8Array([0xff])], 'shot.webp', { type: 'image/webp' });
+      const result = await prepareImageForUpload(webpFile);
+
+      expect(result.file).toBeInstanceOf(File);
+      expect((result.file as File).type).toBe('image/png');
+      expect((result.file as File).name).toBe('shot.png');
+    });
+
+    it('returns the original File untouched (same reference) on the passthrough path', async () => {
+      vi.stubGlobal('Image', DecodingImage);
+
+      const file = makeJpegFile('keep-me.jpg');
+      const result = await prepareImageForUpload(file);
+
+      expect(result.file).toBe(file);
     });
   });
 });

@@ -11,7 +11,8 @@ macOS it prefers the system `sips` binary for speed with no extra
 dependencies; everywhere else — or whenever `sips` is unavailable or fails —
 it falls back to a Node-native decoder (`heic-decode`, WASM `libheif-js`)
 plus a dependency-free ISOBMFF box parser that pulls the source's ICC
-profile straight out of the container and splices it into the output JPEG.
+profile and EXIF metadata straight out of the container and splices them
+into the output JPEG.
 
 ## Exports
 
@@ -27,6 +28,8 @@ function convertHeifToJpegNode(
 ): Promise<ConvertHeifResult>;
 
 function extractIccFromHeif(buffer: Buffer): Buffer | null;
+
+function extractExifFromHeif(buffer: Buffer): Buffer | null;
 ```
 
 `convertHeifToJpeg` is the entry point most callers want: it tries `sips`
@@ -35,7 +38,10 @@ first (file-path input only, macOS only), then falls back to
 Node/WASM path (e.g. to skip the `sips` attempt on a Buffer input, which
 already always uses the Node path). `extractIccFromHeif` is the low-level
 ICC-profile extractor `convertHeifToJpegNode` uses internally; it's exported
-for callers who only need the profile bytes.
+for callers who only need the profile bytes. `extractExifFromHeif` is its
+EXIF counterpart: it returns the source's EXIF metadata as a TIFF-format
+block (with the Orientation tag neutralised to 1 — see Caveats), or `null`
+when the file has no EXIF item.
 
 ## Options
 
@@ -43,6 +49,7 @@ for callers who only need the profile bytes.
 |---|---|---|---|
 | `quality` | `number` | `90` | JPEG encode quality, 1-100. |
 | `maxInputBytes` | `number` | `268435456` (256 MiB) | Reject inputs larger than this many bytes *before* decoding. |
+| `maxDecodePixels` | `number` | `268402689` (sharp's default `limitInputPixels`) | Node path only: reject inputs whose container *declares* more pixels than this (`ispe` box) before the WASM decode — a tiny crafted HEIC declaring huge dimensions would otherwise force a multi-GB allocation inside the decoder. |
 
 `ConvertHeifResult` shape:
 
@@ -53,8 +60,14 @@ interface ConvertHeifResult {
   height: number;
   /** Whether a source ICC profile was found and embedded in the output. */
   iccApplied: boolean;
+  /** Which conversion path produced the output. */
+  converter: 'sips' | 'node';
 }
 ```
+
+`converter` exists because the two paths are not byte-identical: the Node
+fallback diverges from `sips` for nclx-only wide-gamut files (see Caveats),
+so callers that care can detect which path ran.
 
 ## Example
 
@@ -88,6 +101,20 @@ defense-in-depth, not a substitute for trusting the source.
   ("Too many auxiliary image references"). The bundled WASM decoder doesn't
   carry that limit, so `sips` failing on such a file is expected and the
   Node path picks it up automatically.
+- **The Node fallback preserves EXIF, but nclx-only wide-gamut color is
+  lost.** Source EXIF is copied into the output JPEG as an APP1 segment,
+  with the Orientation tag neutralised to 1 because the WASM decoder
+  already applies the container's `irot`/`imir` transforms to the pixels
+  (carrying the source orientation forward would double-rotate in
+  EXIF-aware viewers). What the Node path *cannot* preserve is wide-gamut
+  color described only by an `nclx` colr box with no embedded ICC profile:
+  such output carries no profile and decodes as sRGB, whereas `sips`
+  converts through the system color engine. Check `converter` if this
+  matters to you.
+- **A crafted `colr` box larger than ~16.7 MB is skipped, not embedded.**
+  The ICC-in-JPEG convention caps a profile at 255 APP2 chunks; anything
+  larger is malformed by definition (real profiles are KBs) and degrades
+  gracefully to `iccApplied: false` instead of erroring.
 - **The ICC profile is spliced in as a raw APP2 marker**, not applied via
   sharp's `withIccProfile()` — the decoded pixels are already in the space
   the extracted profile describes, so a color-managed transform would alter

@@ -19,6 +19,16 @@ const ANIMATED_GIF = Buffer.from(
   'base64',
 );
 
+// A real 2-frame animated WebP (8x8, produced by ffmpeg's libwebp encoder).
+// Embedded rather than transcoded from ANIMATED_GIF at test time: sharp
+// 0.35.3's own gif→webp animated transcode of that fixture flattens it to a
+// single VP8 frame, so it can't synthesize this fixture. metadata reports
+// pages=2.
+const ANIMATED_WEBP = Buffer.from(
+  'UklGRnoBAABXRUJQVlA4WAoAAAASAAAABwAABwAAQU5JTQYAAAD/////AABBTk1GnAAAAAAAAAAAAAcAAAcAAPQBAABWUDgghAAAAJACAJ0BKggACAACADQlsAJ0MoA6QApUpcrXQxZgAP7xvH4Mzb5PUl9i8SYs9LsFD/mLNfTXj+3K+k/E8uCJ8vCnQEvw9SdXs9lPAjJ3odwBPlSj/8dnY7CkJkH77/lRVtH//KBw/5UP9ORJax/E7974hFQGF5P97z3xQ9bdz/mhn0gAAEFOTUaqAAAAAAAAAAAABwAABwAA9AEAAFZQOCCSAAAA8AIAnQEqCAAIAAIANCWwAnQ1wD9AOkA9FUHDD+qwFgAA/vG8fgzNvk9SX2LxJiz0uwUP+Ys19NeP7cr6T8TyUF+cn9v//MzdK4ft2qx9HsAxtMMBNO+dwAg5P6/5yVGu8sVhftf+DkTP//inl+ev3w3fV/3X/hs5xUOqt8Oav/LH+PDH/JdH/+PW/yVk//gAAAA=',
+  'base64',
+);
+
 let inputDir: string;
 let outputDir: string;
 
@@ -256,6 +266,65 @@ describe('processImages — animated GIF passthrough', () => {
   });
 });
 
+describe('processImages — animated WebP passthrough (#28)', () => {
+  it('passes an animated WebP through un-flattened instead of emitting first-frame stills', async () => {
+    expect((await sharp(ANIMATED_WEBP).metadata()).pages).toBeGreaterThan(1);
+    await fs.writeFile(path.join(inputDir, 'clip.webp'), ANIMATED_WEBP);
+
+    const summary = await processImages({ inputDir, outputDir });
+    expect(summary.failed).toEqual([]);
+    const result = summary.results[0];
+    expect(result.animated).toBe(true);
+    expect(result.variants).toEqual([]);
+    expect(result.metadata?.hasVariants).toBe(false);
+    expect(await exists(path.join(outputDir, 'clip', '600w.webp'))).toBe(false);
+    // Byte-identical copy, with the animation frames intact.
+    const copied = await fs.readFile(path.join(outputDir, 'clip', 'original.webp'));
+    expect(copied).toEqual(ANIMATED_WEBP);
+    expect((await sharp(copied).metadata()).pages).toBeGreaterThan(1);
+  });
+
+  it('keeps a single-frame webp on the still-variant path', async () => {
+    const stillWebp = await sharp({ create: { width: 700, height: 500, channels: 3, background: { r: 5, g: 60, b: 90 } } })
+      .webp()
+      .toBuffer();
+    await fs.writeFile(path.join(inputDir, 'still.webp'), stillWebp);
+
+    const summary = await processImages({ inputDir, outputDir });
+    expect(summary.failed).toEqual([]);
+    expect(summary.results[0].animated).toBe(false);
+    expect(await exists(path.join(outputDir, 'still', '600w.webp'))).toBe(true);
+    expect(await exists(path.join(outputDir, 'still', 'original.webp'))).toBe(false);
+  });
+});
+
+describe('processImages — still AVIF is never passthrough-copied (review finding)', () => {
+  it('routes a still AVIF down the normal variant path (pages===1, format "heif")', async () => {
+    // Pin the empirical fact the ANIMATED_PAGE_FORMATS comment relies on:
+    // on the pinned sharp 0.35.3 / libvips stack a still AVIF is probed as
+    // format 'heif' with pages 1, so it must NOT match the animated set and
+    // must NOT be byte-copied as an "original" without width variants.
+    const stillAvif = await sharp({
+      create: { width: 700, height: 500, channels: 3, background: { r: 30, g: 120, b: 60 } },
+    })
+      .avif({ quality: 50 })
+      .toBuffer();
+    const probed = await sharp(stillAvif).metadata();
+    expect(probed.format).toBe('heif');
+    expect(probed.pages ?? 1).toBe(1);
+
+    await fs.writeFile(path.join(inputDir, 'shot.avif'), stillAvif);
+
+    const summary = await processImages({ inputDir, outputDir });
+    expect(summary.failed).toEqual([]);
+    expect(summary.results[0].animated).toBe(false);
+    // Resized width variants were emitted...
+    expect(await exists(path.join(outputDir, 'shot', '600w.webp'))).toBe(true);
+    // ...and no byte-for-byte passthrough copy was left behind.
+    expect(await exists(path.join(outputDir, 'shot', 'original.avif'))).toBe(false);
+  });
+});
+
 describe('processImages — orphan cleanup', () => {
   it('is opt-in and only removes directories directly under the output dir', async () => {
     await writeJpeg('keep.jpg', 400, 400);
@@ -308,6 +377,41 @@ describe('processImages — safety and cache invalidation', () => {
     expect(summary.results).toEqual([]);
     expect(summary.failed).toHaveLength(2);
     expect(summary.failed.every((f) => f.stage === 'slug' && f.slug === 'dup')).toBe(true);
+  });
+
+  it('processes a file reachable via both inputDir and files exactly once (#46)', async () => {
+    const filePath = await writeJpeg('both.jpg', 500, 500);
+    // A non-normalized spelling of the same path must still dedupe.
+    const summary = await processImages({ inputDir, outputDir, files: [path.join(inputDir, '.', 'both.jpg')] });
+
+    expect(summary.failed).toEqual([]);
+    expect(summary.results).toHaveLength(1);
+    expect(summary.results[0]).toMatchObject({ slug: 'both', inputPath: filePath, status: 'processed' });
+  });
+
+  it('still rejects a slug collision between genuinely different files across inputDir and files (#46)', async () => {
+    await writeJpeg('twin.jpg', 400, 400);
+    const otherDir = path.join(path.dirname(inputDir), 'other');
+    await fs.mkdir(otherDir, { recursive: true });
+    const otherTwin = path.join(otherDir, 'twin.jpg');
+    await fs.copyFile(path.join(inputDir, 'twin.jpg'), otherTwin);
+
+    const summary = await processImages({ inputDir, outputDir, files: [otherTwin] });
+    expect(summary.results).toEqual([]);
+    expect(summary.failed).toHaveLength(2);
+    expect(summary.failed.every((f) => f.stage === 'slug' && f.slug === 'twin')).toBe(true);
+  });
+
+  it("tags an unreadable source as stage 'io', not 'unknown' (#45)", async () => {
+    const missing = path.join(inputDir, 'missing.jpg');
+    await expect(processOne({ inputPath: missing }, { outputDir })).rejects.toMatchObject({
+      name: 'VariantProcessingError',
+      stage: 'io',
+    });
+
+    const summary = await processImages({ outputDir, files: [missing] });
+    expect(summary.failed).toHaveLength(1);
+    expect(summary.failed[0]).toMatchObject({ slug: 'missing', stage: 'io' });
   });
 });
 

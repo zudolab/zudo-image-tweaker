@@ -13,6 +13,7 @@ export interface ShadowLayer {
 
 export interface ShadowTuning {
   blur: number;
+  /** Valid range 0..1. Out-of-range values are clamped (prevents 8-bit raw-buffer wraparound). */
   opacity: number;
   offsetX: number;
   offsetY: number;
@@ -29,6 +30,7 @@ export interface ProjectedShadowTuning extends ShadowTuning {
 export interface VignetteTuning {
   lightX: number;
   lightY: number;
+  /** Valid range 0..1. Out-of-range values are clamped (prevents 8-bit raw-buffer wraparound). */
   strength: number;
   spread: number;
 }
@@ -133,6 +135,17 @@ function mergeBottomShadows(
   return defaults.map((base, i) => ({ ...base, ...overrides?.[i] }));
 }
 
+/**
+ * Clamp opacity/strength tuning inputs to [0, 1]. Downstream math multiplies
+ * these directly into raw 8-bit buffer bytes (`buf[i] = value`), which is a
+ * Node Buffer/Uint8Array write — an out-of-range value silently wraps modulo
+ * 256 instead of throwing, producing inverted-brightness ring artifacts.
+ */
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
 /** Find the bounding box of non-zero pixels in a single-channel raw buffer. */
 function findBbox(alphaRaw: Buffer, width: number, height: number): BBox | null {
   let top = height;
@@ -167,7 +180,7 @@ async function createContactShadow(
   const blurredAlpha = await sharp(offsetAlpha, { raw: { width, height, channels: 1 } })
     .toColourspace('b-w')
     .blur(Math.max(blur, 0.3))
-    .linear(opacity, 0)
+    .linear(clamp01(opacity), 0)
     .png()
     .toBuffer();
 
@@ -225,7 +238,7 @@ async function createProjectedShadow(
   const blurredAlpha = await sharp(canvas, { raw: { width, height, channels: 1 } })
     .toColourspace('b-w')
     .blur(Math.max(blur, 0.3))
-    .linear(opacity, 0)
+    .linear(clamp01(opacity), 0)
     .png()
     .toBuffer();
 
@@ -245,6 +258,7 @@ async function createBottomOnlyShadow(
 ): Promise<ShadowLayer> {
   if (!bbox) return createEmptyLayer(width, height);
 
+  const clampedOpacity = clamp01(opacity);
   const offsetAlpha = offsetBuffer(alphaRaw, width, height, offsetX, offsetY);
 
   const blurredBuf = await sharp(offsetAlpha, { raw: { width, height, channels: 1 } })
@@ -267,7 +281,7 @@ async function createBottomOnlyShadow(
     } else {
       maskVal = 1;
     }
-    const scaledMask = maskVal * opacity;
+    const scaledMask = maskVal * clampedOpacity;
     for (let x = 0; x < width; x++) {
       result[y * width + x] = Math.round(blurredBuf[y * width + x] * scaledMask);
     }
@@ -290,6 +304,7 @@ async function createVignette(
   height: number,
   { lightX, lightY, strength, spread }: VignetteTuning,
 ): Promise<ShadowLayer> {
+  const clampedStrength = clamp01(strength);
   const buf = Buffer.alloc(width * height, 0);
   const cx = width * lightX;
   const cy = height * lightY;
@@ -302,7 +317,7 @@ async function createVignette(
     for (let x = 0; x < width; x++) {
       const dx = (x - cx) / halfCanvas;
       const distSq = dx * dx + dySq;
-      const darkness = Math.min(1, (distSq / spreadSq) ** 0.75) * strength * 255;
+      const darkness = Math.min(1, (distSq / spreadSq) ** 0.75) * clampedStrength * 255;
       buf[y * width + x] = Math.round(darkness);
     }
   }

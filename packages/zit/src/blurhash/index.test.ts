@@ -115,6 +115,15 @@ describe('blurhashToDataUri', () => {
     expect(metadata.width).toBe(8);
     expect(metadata.height).toBe(8);
   });
+
+  it('rejects a non-positive or fractional size with a named error', async () => {
+    const image = await syntheticImage();
+    const hash = await encodeImageToBlurhash(image);
+
+    await expect(blurhashToDataUri(hash, { size: 0 })).rejects.toThrow(/size must be a positive integer/);
+    await expect(blurhashToDataUri(hash, { size: -4 })).rejects.toThrow(/size must be a positive integer/);
+    await expect(blurhashToDataUri(hash, { size: 3.5 })).rejects.toThrow(/size must be a positive integer/);
+  });
 });
 
 describe('batchBlurhashToDataUri', () => {
@@ -146,6 +155,31 @@ describe('batchBlurhashToDataUri', () => {
     for (const dataUri of results) {
       expect(dataUri.startsWith(PNG_DATA_URI_PREFIX)).toBe(true);
     }
+  });
+
+  it('honours the size option, matching single-decode output (parity)', async () => {
+    const image = await syntheticImage();
+    const hash = await encodeImageToBlurhash(image);
+
+    const [single, batch] = await Promise.all([
+      blurhashToDataUri(hash, { size: 8 }),
+      batchBlurhashToDataUri([hash, hash], { size: 8 }),
+    ]);
+
+    expect(batch).toEqual([single, single]);
+    const metadata = await sharp(dataUriToPngBuffer(batch[0])).metadata();
+    expect(metadata.width).toBe(8);
+    expect(metadata.height).toBe(8);
+  });
+
+  it('defaults to the 16px decode size when size is omitted', async () => {
+    const image = await syntheticImage();
+    const hash = await encodeImageToBlurhash(image);
+
+    const [dataUri] = await batchBlurhashToDataUri([hash]);
+    const metadata = await sharp(dataUriToPngBuffer(dataUri)).metadata();
+    expect(metadata.width).toBe(16);
+    expect(metadata.height).toBe(16);
   });
 
   it('returns an empty array for an empty input', async () => {

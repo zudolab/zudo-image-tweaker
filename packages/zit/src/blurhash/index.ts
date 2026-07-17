@@ -59,6 +59,13 @@ export async function blurhashToDataUri(
   options: BlurhashToDataUriOptions = {},
 ): Promise<string> {
   const { size = 16 } = options;
+  // A 0/negative/fractional size flows straight into `decode` and sharp's
+  // raw buffer dimensions, where it surfaces as an opaque sharp error rather
+  // than a named validation failure — guard it explicitly, mirroring
+  // batchBlurhashToDataUri's chunkSize and calibrate's patchSize guards.
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new Error(`blurhashToDataUri: size must be a positive integer, got ${size}`);
+  }
 
   const pixels = decode(hash, size, size);
   const pngBuffer = await sharp(Buffer.from(pixels), {
@@ -73,6 +80,8 @@ export async function blurhashToDataUri(
 export interface BatchBlurhashToDataUriOptions {
   /** Number of hashes decoded concurrently per batch. */
   chunkSize?: number;
+  /** Output width and height, in pixels, of each decoded PNG. */
+  size?: number;
 }
 
 /**
@@ -84,7 +93,7 @@ export async function batchBlurhashToDataUri(
   hashes: string[],
   options: BatchBlurhashToDataUriOptions = {},
 ): Promise<string[]> {
-  const { chunkSize = 20 } = options;
+  const { chunkSize = 20, size } = options;
   if (!Number.isInteger(chunkSize) || chunkSize < 1) {
     throw new Error(`batchBlurhashToDataUri: chunkSize must be a positive integer, got ${chunkSize}`);
   }
@@ -92,7 +101,7 @@ export async function batchBlurhashToDataUri(
   const results: string[] = [];
   for (let i = 0; i < hashes.length; i += chunkSize) {
     const chunk = hashes.slice(i, i + chunkSize);
-    const decoded = await Promise.all(chunk.map((hash) => blurhashToDataUri(hash)));
+    const decoded = await Promise.all(chunk.map((hash) => blurhashToDataUri(hash, { size })));
     results.push(...decoded);
   }
   return results;

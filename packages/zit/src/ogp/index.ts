@@ -1,4 +1,6 @@
-import { writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { rename, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import sharp from 'sharp';
 
 /** File path or in-memory buffer accepted as the compositor's source image. */
@@ -183,7 +185,20 @@ async function finalizeResult(
   };
 
   if (outPath) {
-    await writeFile(outPath, buffer);
+    // Atomic write: stage in a sibling temp file, then rename(2) over the
+    // target so a crash mid-write never leaves a truncated OGP image at the
+    // final path (which the variants engine's cache would treat as a hit).
+    const tmpPath = path.join(
+      path.dirname(outPath),
+      `.${path.basename(outPath)}.${randomUUID()}.tmp`,
+    );
+    try {
+      await writeFile(tmpPath, buffer);
+      await rename(tmpPath, outPath);
+    } catch (error) {
+      await rm(tmpPath, { force: true });
+      throw error;
+    }
     result.path = outPath;
   }
 
@@ -204,6 +219,14 @@ export async function generateOgpImage(
   // Cap the default so the card never exceeds a caller-shrunk canvas — sharp
   // rejects a composite layer larger than its base image.
   const foregroundSize = opts.foregroundSize ?? Math.min(DEFAULT_FOREGROUND_SIZE, width, height);
+  const canvasLimit = Math.min(width, height);
+  if (foregroundSize > canvasLimit) {
+    throw new Error(
+      `foregroundSize (${foregroundSize}) exceeds the canvas limit of ${canvasLimit}px ` +
+        `(the smaller of width=${width} and height=${height}); the composite card ` +
+        'cannot be larger than the canvas it is centered on.',
+    );
+  }
   const cornerRadius = opts.cornerRadius ?? DEFAULT_CORNER_RADIUS;
   const blurSigma = opts.blurSigma ?? DEFAULT_BLUR_SIGMA;
   const desaturate = opts.desaturate ?? DEFAULT_DESATURATE;
@@ -221,6 +244,15 @@ export async function generateOgpImage(
     cornerRadius,
     shadowOffsetY: opts.shadowOffsetY ?? DEFAULT_SHADOW_OFFSET_Y,
   };
+
+  // Colour management (issue #71): both `sharp(input)` decodes below rely
+  // on sharp 0.35.3's default behaviour of honouring the source's embedded
+  // ICC profile — pixels are genuinely converted to sRGB and the profile is
+  // dropped, so a Display-P3 photo composites and renders correctly as an
+  // untagged sRGB JPEG (verified pixel-level on a P3 fixture). Do NOT add
+  // `keepIccProfile()` to any stage here: on the final `.composite()` stage
+  // it re-tags the already-sRGB-converted card pixels with the source
+  // profile, which mis-renders (also verified).
 
   // 1. Blurred, desaturated cover-crop background.
   const background = await sharp(input)
@@ -285,6 +317,12 @@ export async function generateOgpFromLandscape(
   const quality = opts.quality ?? DEFAULT_QUALITY;
   const progressive = opts.progressive ?? DEFAULT_PROGRESSIVE;
 
+  // Colour management (issue #71): like generateOgpImage, this relies on
+  // sharp's default input-profile handling — a Display-P3 source is
+  // genuinely converted to sRGB and emitted untagged, which renders
+  // correctly everywhere (verified pixel-level on a P3 fixture). Both OGP
+  // branches deliberately emit plain sRGB: social-card scrapers are the
+  // consumer, and untagged sRGB is the most robust encoding for them.
   const buffer = await sharp(input)
     .rotate() // Auto-rotate based on EXIF orientation.
     .resize(width, height, { fit: 'cover', position: 'center' })

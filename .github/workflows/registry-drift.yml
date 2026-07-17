@@ -1,0 +1,149 @@
+# registry-drift.yml
+#
+# Scheduled registry drift net (issue #56). release.yml's post-publish smoke
+# only fires once, right after a publish — it can never catch the registry
+# (or a downstream CDN/mirror) silently breaking days or weeks later for
+# reasons unrelated to any commit in this repo (npm outages, a since-yanked
+# transitive dependency, a registry-side metadata bug, etc). This workflow
+# re-runs the same "install the real published artifact, resolve every
+# exports subpath" check on a schedule against whatever `@latest` currently
+# resolves to, independent of any release.
+#
+# One-tracking-issue pattern: on failure, open (or comment on) a single
+# issue found by exact title match; on the next green run, comment and close
+# it. This avoids spamming a new issue on every failed weekly run.
+#
+# Action SHAs are pinned to immutable commits (OpenSSF best practice), same
+# pins as ci.yml/release.yml.
+
+name: Registry Drift Net
+
+on:
+  schedule:
+    # Weekly, off the top of the hour to avoid the GitHub Actions scheduler
+    # pile-up at :00/:30.
+    - cron: "17 5 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-drift-net
+  cancel-in-progress: false
+
+env:
+  PKG_NAME: "@takazudo/zudo-image-tweaker"
+  TRACKING_ISSUE_TITLE: "Registry drift: @latest install/import smoke failed"
+
+jobs:
+  drift-check:
+    name: Verify @latest installs and resolves
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+
+      - name: Install @latest and resolve every exports subpath
+        id: smoke
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK_DIR=$(mktemp -d)
+          cd "$WORK_DIR"
+          npm init -y >/dev/null
+
+          echo "==> Installing $PKG_NAME@latest"
+          npm i "$PKG_NAME@latest" >/dev/null
+
+          INSTALLED_VERSION=$(node -p "require('./node_modules/$PKG_NAME/package.json').version")
+          echo "Installed version: $INSTALLED_VERSION"
+
+          # Derive subpaths from the exports map the registry actually
+          # ships, mirroring scripts/check-pack.sh (which does the same
+          # against a local pack, not a registry install).
+          SUBPATHS=$(node -p "Object.keys(require('./node_modules/$PKG_NAME/package.json').exports).join('\n')")
+
+          echo "==> Checking: every exports subpath resolves"
+          while IFS= read -r SUBPATH; do
+            [ -z "$SUBPATH" ] && continue
+
+            if [ "$SUBPATH" = "." ]; then
+              SPECIFIER="$PKG_NAME"
+            else
+              SPECIFIER="$PKG_NAME${SUBPATH#.}"
+            fi
+
+            if [ "$SUBPATH" = "./package.json" ]; then
+              RESOLVED_VERSION=$(node -p "require('$SPECIFIER').version")
+              if [ "$RESOLVED_VERSION" != "$INSTALLED_VERSION" ]; then
+                echo "::error::$SPECIFIER resolved but version ($RESOLVED_VERSION) != $INSTALLED_VERSION"
+                exit 1
+              fi
+              echo "OK: $SPECIFIER resolves (version $INSTALLED_VERSION)"
+              continue
+            fi
+
+            node -e "
+              const specifier = process.argv[1];
+              import(specifier).then(() => {
+                // Resolution-only, same scope as check-pack.sh.
+              }).catch((err) => {
+                console.error('::error::failed to resolve', specifier);
+                console.error(err);
+                process.exit(1);
+              });
+            " "$SPECIFIER"
+            echo "OK: $SPECIFIER resolves"
+          done <<< "$SUBPATHS"
+
+          echo ""
+          echo "registry-drift: all checks passed for $PKG_NAME@$INSTALLED_VERSION"
+
+      - name: Find existing tracking issue
+        id: find-issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NUMBER=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+            | jq -r --arg t "$TRACKING_ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -n1)
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update tracking issue on failure
+        if: steps.smoke.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_NUMBER: ${{ steps.find-issue.outputs.number }}
+        run: |
+          BODY="Scheduled registry-drift check failed: installing \`$PKG_NAME@latest\` or resolving one of its exports subpaths broke.
+
+          Run: $RUN_URL
+
+          This issue is auto-managed by \`.github/workflows/registry-drift.yml\` — it stays open until the next scheduled run is green, then closes automatically."
+          if [ -n "$ISSUE_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TRACKING_ISSUE_TITLE" --body "$BODY"
+          fi
+
+      - name: Close tracking issue on recovery
+        if: steps.smoke.outcome == 'success' && steps.find-issue.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.find-issue.outputs.number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "Registry drift check is green again — closing."
+          gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY"
+
+      - name: Fail the job if the smoke check failed
+        if: steps.smoke.outcome == 'failure'
+        run: exit 1

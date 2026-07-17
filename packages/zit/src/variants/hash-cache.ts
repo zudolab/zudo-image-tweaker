@@ -21,7 +21,7 @@ export interface CacheEntry {
    * outputs from satisfying the new mode's expected-output subset.
    */
   mode: TagMode;
-  /** Whether the source was handled as an animated-GIF passthrough. */
+  /** Whether the source was handled as an animated passthrough (GIF/WebP/APNG). */
   animated: boolean;
   /**
    * The exact filenames this run emitted into the slug directory. Compared
@@ -31,6 +31,15 @@ export interface CacheEntry {
    * than a stale hit on a lingering older-scheme file.
    */
   outputs: string[];
+  /**
+   * On-disk byte size of every filename in `outputs`, keyed by filename.
+   * Validated against the actual file size on a cache hit so a truncated
+   * output — e.g. one left by a crash mid-write under an older, non-atomic
+   * version — is treated as a miss instead of a poisoned hit. An entry
+   * written before this field existed lacks it entirely, which the cache
+   * check reads as "unverifiable" and reprocesses once.
+   */
+  outputSizes: Record<string, number>;
   /** Last emitted metadata record (null for OGP-only images), replayed on a cache hit. */
   metadata: VariantMetadata | null;
 }
@@ -40,6 +49,14 @@ let hasherPromise: ReturnType<typeof xxhash> | null = null;
 function getHasher(): ReturnType<typeof xxhash> {
   if (!hasherPromise) {
     hasherPromise = xxhash();
+    // A failed WASM init must not poison hashFile for the rest of the
+    // process: drop the memo on rejection so the next call re-invokes
+    // xxhash(). The assign-then-attach order keeps the concurrent-first-call
+    // race safe — every caller in the same tick shares this one promise, and
+    // the memo is only cleared once it has actually rejected.
+    hasherPromise.catch(() => {
+      hasherPromise = null;
+    });
   }
   return hasherPromise;
 }
@@ -52,23 +69,40 @@ export async function hashFile(filePath: string): Promise<string> {
 }
 
 /**
- * Write `data` to `filePath` atomically: stage it in a sibling temp file,
- * then rename over the target. rename(2) is atomic within a filesystem, so
- * a reader never observes a half-written file and a crash mid-write leaves
- * the previous version intact.
+ * Produce `filePath` atomically: `produce` writes to a sibling temp path in
+ * the SAME directory, which is then renamed over the target. rename(2) is
+ * atomic within a filesystem, so a reader never observes a half-written file
+ * and a crash before the rename leaves the previous version intact — never a
+ * truncated one at the final path. On any failure the temp file is removed.
+ *
+ * Invariant this establishes for every cached output: a file that exists at
+ * its final path is complete. `produce`'s return value (e.g. sharp's
+ * OutputInfo) is passed through so callers keep the size/metadata they need.
  */
-export async function writeFileAtomic(filePath: string, data: string | Buffer): Promise<void> {
+export async function writeAtomicVia<T>(
+  filePath: string,
+  produce: (tmpPath: string) => Promise<T>,
+): Promise<T> {
   const tmpPath = path.join(
     path.dirname(filePath),
     `.${path.basename(filePath)}.${randomUUID()}.tmp`,
   );
   try {
-    await fs.writeFile(tmpPath, data);
+    const result = await produce(tmpPath);
     await fs.rename(tmpPath, filePath);
+    return result;
   } catch (error) {
     await fs.rm(tmpPath, { force: true });
     throw error;
   }
+}
+
+/**
+ * Write `data` to `filePath` atomically via {@link writeAtomicVia}: staged in
+ * a sibling temp file, then renamed over the target.
+ */
+export async function writeFileAtomic(filePath: string, data: string | Buffer): Promise<void> {
+  await writeAtomicVia(filePath, (tmpPath) => fs.writeFile(tmpPath, data));
 }
 
 /** Read and parse a cache sidecar, or null when it's absent or unparseable. */

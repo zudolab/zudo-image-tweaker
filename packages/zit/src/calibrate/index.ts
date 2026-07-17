@@ -26,17 +26,45 @@
  * pre-convert such inputs to JPEG/PNG (e.g. via the sibling `/heif`
  * module, which does carry a Node-native fallback) before calling into
  * this module. Buffer input bypasses HEIC handling entirely; only a
- * string path is checked for a `.heic`/`.heif` extension.
+ * string path is checked for a `.heic`/`.heif` extension. A `sips` failure
+ * for any reason other than being absent (e.g. an HDR "gain map" HEIC
+ * whose auxiliary-image references exceed the system libheif's limit —
+ * see `/heif`'s module doc for the full explanation) is rethrown wrapped
+ * with the same pre-convert-via-`/heif` guidance (issue #34).
+ *
+ * ICC profile (issue #35): `normalizeBackgroundColor` samples and corrects
+ * pixels via a raw decode, which yields the source's literal device-space
+ * sample values without any colour-space conversion (verified empirically:
+ * a Display-P3-tagged source's raw pixels are numerically unchanged from
+ * its stored bytes). All arithmetic — sampling, target-ratio scaling,
+ * hue/saturation gating — therefore stays self-consistent in that same
+ * device space throughout. To avoid re-interpreting those device-space
+ * values as sRGB (which would shift the rendered colour for any
+ * wide-gamut source), the source's ICC profile, if present, is re-attached
+ * byte-identically to the output via `sharp#withIccProfile` pointed at a
+ * temp file holding the extracted profile bytes — this only tags the
+ * output, it does not run a colour transform, because the pipeline is
+ * built from a raw pixel buffer with no profile of its own to transform
+ * from (see the `withIccProfile` call site below for the same reasoning
+ * `/heif` documents for its APP2 splice). EXIF and all other metadata are
+ * always dropped: the raw-buffer re-encode carries no EXIF forward and
+ * this module never re-attaches any (unlike ICC, which is deliberately
+ * restored) — there is no `stripMetadata`-style opt-out.
  */
 
-import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import sharp from 'sharp';
+import { isMissingBinaryError, resolveBinaryPath, run } from '../variants/run.js';
 
-const execFileAsync = promisify(execFile);
+// Same default as the shared variants runner (src/variants/run.ts): long
+// enough for a real conversion, short enough that a hung `sips` process
+// can't stall a caller forever (issue #67). Unlike /heif this module has
+// no Node-native HEIC fallback, so a timeout still surfaces as an error —
+// the same contract a non-timeout `sips` failure already has.
+const DEFAULT_SIPS_TIMEOUT_MS = 60_000;
 
 const DEFAULT_PATCH_SIZE = 50;
 const PATCH_MARGIN = 5;
@@ -63,6 +91,11 @@ export interface SaturationGate {
 export interface SampleBackgroundColorOptions {
   /** Size (px) of each square corner patch sampled. @default 50 */
   patchSize?: number;
+  /**
+   * HEIC/HEIF input only: kill the `sips` conversion subprocess if it
+   * hasn't exited after this many ms. @default 60000
+   */
+  sipsTimeoutMs?: number;
 }
 
 export interface NormalizeBackgroundColorOptions {
@@ -78,6 +111,11 @@ export interface NormalizeBackgroundColorOptions {
   channelClamp?: [number, number];
   /** Output encoding. Inferred from `input`'s extension when it's a path (default jpeg); defaults to jpeg for Buffer input. */
   format?: 'jpeg' | 'png' | 'webp' | 'tiff';
+  /**
+   * HEIC/HEIF input only: kill the `sips` conversion subprocess if it
+   * hasn't exited after this many ms. @default 60000
+   */
+  sipsTimeoutMs?: number;
 }
 
 export interface NormalizeBackgroundColorResult {
@@ -100,28 +138,54 @@ function isHeicPath(input: string): boolean {
  * capability-loss error; any other `sips` failure (e.g. a genuinely
  * corrupt file) is rethrown unchanged.
  */
-async function tryHeicToTempJpeg(heicPath: string): Promise<string | null> {
-  const tempPath = path.join(
-    os.tmpdir(),
-    `zit-calibrate-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`,
-  );
+async function tryHeicToTempJpeg(heicPath: string, timeoutMs: number): Promise<string | null> {
+  // randomUUID (not pid+timestamp) avoids output-path collisions between
+  // concurrent conversions in the same process, matching the sibling /heif
+  // module's tryConvertWithSips.
+  const tempPath = path.join(os.tmpdir(), `zit-calibrate-${process.pid}-${randomUUID()}.jpg`);
   try {
-    await execFileAsync('sips', [
-      '-s',
-      'format',
-      'jpeg',
-      heicPath,
-      '--out',
-      tempPath,
-      '-s',
-      'formatOptions',
-      '95',
-    ]);
+    // Shared hardened exec seam (variants/run.ts): argument array (never a
+    // shell string), the input path resolved before it reaches argv so a
+    // leading-dash relative filename can't be read as an option flag (issue
+    // #66), and a SIGKILL-enforced timeout (issue #67). Argument order
+    // matches the sibling /heif module — all `-s` options first, then the
+    // input file, then `--out` last — per `man sips`
+    // (`sips [options] file... --out outfile`). On timeout `run` rejects,
+    // handled below like any other non-ENOENT sips failure.
+    await run(
+      'sips',
+      [
+        '-s',
+        'format',
+        'jpeg',
+        '-s',
+        'formatOptions',
+        '95',
+        resolveBinaryPath(heicPath),
+        '--out',
+        tempPath,
+      ],
+      { timeoutMs },
+    );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    // A non-zero `sips` exit can still leave a partial `tempPath` on disk
+    // (e.g. the gain-map failure documented below) — force-remove it here,
+    // mirroring the sibling /heif module's tryConvertWithSips, so a
+    // failed conversion never leaks a temp JPEG (issue #34).
+    await fs.rm(tempPath, { force: true });
+    if (isMissingBinaryError(error)) {
       return null;
     }
-    throw error;
+    throw new Error(
+      `HEIC/HEIF conversion via 'sips' failed for '${heicPath}': ${(error as Error).message}. ` +
+        "This can happen with HDR \"gain map\" HEIC files, which the system libheif that " +
+        '`sips` relies on may reject via a strict auxiliary-image-reference limit. ' +
+        "Pre-convert '" +
+        heicPath +
+        "' via the sibling /heif module (whose Node fallback does not carry that limit) " +
+        'before calling this function.',
+      { cause: error },
+    );
   }
   return tempPath;
 }
@@ -136,9 +200,12 @@ interface DecodeSource {
  * string paths are routed through `sips` first; every other input (any
  * Buffer, or a non-HEIC path) passes through unchanged.
  */
-async function resolveDecodeSource(input: string | Buffer): Promise<DecodeSource> {
+async function resolveDecodeSource(
+  input: string | Buffer,
+  sipsTimeoutMs: number,
+): Promise<DecodeSource> {
   if (typeof input === 'string' && isHeicPath(input)) {
-    const tempPath = await tryHeicToTempJpeg(input);
+    const tempPath = await tryHeicToTempJpeg(input, sipsTimeoutMs);
     if (!tempPath) {
       throw new Error(
         `HEIC/HEIF decoding requires macOS 'sips', which is unavailable on this platform. ` +
@@ -202,9 +269,10 @@ export async function sampleBackgroundColor(
   opts: SampleBackgroundColorOptions = {},
 ): Promise<RgbColor> {
   const patchSize = opts.patchSize ?? DEFAULT_PATCH_SIZE;
+  const sipsTimeoutMs = opts.sipsTimeoutMs ?? DEFAULT_SIPS_TIMEOUT_MS;
   const minDimension = patchSize + PATCH_MARGIN * 2;
 
-  const { sharpInput, cleanup } = await resolveDecodeSource(input);
+  const { sharpInput, cleanup } = await resolveDecodeSource(input, sipsTimeoutMs);
   try {
     const { width, height } = await orientedDimensions(sharpInput);
     if (!width || !height || width < minDimension || height < minDimension) {
@@ -353,13 +421,78 @@ function applyFormat(pipeline: SharpPipeline, format: 'jpeg' | 'png' | 'webp' | 
 }
 
 /**
- * Normalize an image's background color toward `opts.target`. The current
- * background is sampled first (see {@link sampleBackgroundColor}); each
- * channel's target/current ratio becomes that channel's scale factor,
+ * Average the RGB of a square patch cut directly out of an already-decoded
+ * raw pixel buffer (row-major, `channels`-interleaved). Used to sample the
+ * background from the single full-image decode `normalizeBackgroundColor`
+ * already performs, instead of re-decoding four corner extracts (issue #50).
+ */
+function averageRgbOfRawPatch(
+  pixels: Buffer,
+  imageWidth: number,
+  channels: number,
+  left: number,
+  top: number,
+  size: number,
+): RgbColor {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for (let y = 0; y < size; y++) {
+    let rowStart = ((top + y) * imageWidth + left) * channels;
+    for (let x = 0; x < size; x++) {
+      r += pixels[rowStart];
+      g += pixels[rowStart + 1];
+      b += pixels[rowStart + 2];
+      rowStart += channels;
+    }
+  }
+  const pixelCount = size * size;
+  return {
+    r: Math.round(r / pixelCount),
+    g: Math.round(g / pixelCount),
+    b: Math.round(b / pixelCount),
+  };
+}
+
+/**
+ * Sample the background color of an already-decoded raw pixel buffer by
+ * averaging its four corner patches — the same four-corner strategy as
+ * {@link sampleBackgroundColor}, applied in-memory rather than via a fresh
+ * decode.
+ */
+function sampleBackgroundFromRawBuffer(
+  pixels: Buffer,
+  imageWidth: number,
+  imageHeight: number,
+  channels: number,
+  patchSize: number,
+): RgbColor {
+  const corners = [
+    { left: PATCH_MARGIN, top: PATCH_MARGIN },
+    { left: imageWidth - patchSize - PATCH_MARGIN, top: PATCH_MARGIN },
+    { left: PATCH_MARGIN, top: imageHeight - patchSize - PATCH_MARGIN },
+    { left: imageWidth - patchSize - PATCH_MARGIN, top: imageHeight - patchSize - PATCH_MARGIN },
+  ];
+  return averageRgbColors(
+    corners.map((corner) => averageRgbOfRawPatch(pixels, imageWidth, channels, corner.left, corner.top, patchSize)),
+  );
+}
+
+/**
+ * Normalize an image's background color toward `opts.target`. The image is
+ * converted (if HEIC/HEIF) and decoded to raw pixels exactly once; the
+ * current background is sampled directly from that raw buffer (see
+ * {@link sampleBackgroundFromRawBuffer}) rather than via a second decode.
+ * Each channel's target/current ratio becomes that channel's scale factor,
  * clamped to `opts.channelClamp`. Per pixel, the scaled value is blended
  * in proportional to {@link computeCorrectionWeight}, so only pixels close
  * in hue to the *sampled* background — and saturated enough to carry that
  * hue reliably — move; neutrals and dark pixels are returned unchanged.
+ *
+ * ICC: the source's ICC profile, if present, is re-attached byte-identically
+ * to the output (see the module doc comment for why re-attaching rather
+ * than transforming is correct here). EXIF and all other metadata are
+ * always dropped — see the module doc comment's "EXIF" note.
  */
 export async function normalizeBackgroundColor(
   input: string | Buffer,
@@ -372,24 +505,21 @@ export async function normalizeBackgroundColor(
     saturationGate = DEFAULT_SATURATION_GATE,
     channelClamp = DEFAULT_CHANNEL_CLAMP,
     format,
+    sipsTimeoutMs = DEFAULT_SIPS_TIMEOUT_MS,
   } = opts;
+  // sampleBackgroundColor's sharp `.extract()` call rejects a non-positive
+  // or fractional patchSize on its own; the in-memory sampler below has no
+  // equivalent guard (a 0 divides by zero into NaN scales, a negative or
+  // fractional value silently miscounts pixels), so validate explicitly.
+  if (!Number.isInteger(patchSize) || patchSize <= 0) {
+    throw new Error(`patchSize must be a positive integer, got ${patchSize}`);
+  }
+  const minDimension = patchSize + PATCH_MARGIN * 2;
 
-  const currentBg = await sampleBackgroundColor(input, { patchSize });
-
-  const [clampMin, clampMax] = channelClamp;
-  const safeScale = (targetChannel: number, currentChannel: number) =>
-    currentChannel === 0 ? 1 : clampNumber(targetChannel / currentChannel, clampMin, clampMax);
-
-  const scaleR = safeScale(target.r, currentBg.r);
-  const scaleG = safeScale(target.g, currentBg.g);
-  const scaleB = safeScale(target.b, currentBg.b);
-
-  const refHue = hueOf(currentBg.r, currentBg.g, currentBg.b);
-  const refSat = saturationOf(currentBg.r, currentBg.g, currentBg.b);
-
-  const { sharpInput, cleanup } = await resolveDecodeSource(input);
+  const { sharpInput, cleanup } = await resolveDecodeSource(input, sipsTimeoutMs);
+  let iccTempPath: string | null = null;
   try {
-    const { hasAlpha } = await sharp(sharpInput).metadata();
+    const { hasAlpha, icc } = await sharp(sharpInput).metadata();
     const alphaAwarePipeline = sharp(sharpInput).rotate();
     const { data, info } = await (hasAlpha
       ? alphaAwarePipeline.ensureAlpha()
@@ -400,6 +530,31 @@ export async function normalizeBackgroundColor(
 
     const channels = info.channels;
     const pixels = Buffer.from(data);
+
+    if (
+      !info.width ||
+      !info.height ||
+      info.width < minDimension ||
+      info.height < minDimension
+    ) {
+      throw new Error(
+        `Image too small (${info.width ?? 0}x${info.height ?? 0}). Minimum ${minDimension}x${minDimension} required.`,
+      );
+    }
+
+    const currentBg = sampleBackgroundFromRawBuffer(pixels, info.width, info.height, channels, patchSize);
+
+    const [clampMin, clampMax] = channelClamp;
+    const safeScale = (targetChannel: number, currentChannel: number) =>
+      currentChannel === 0 ? 1 : clampNumber(targetChannel / currentChannel, clampMin, clampMax);
+
+    const scaleR = safeScale(target.r, currentBg.r);
+    const scaleG = safeScale(target.g, currentBg.g);
+    const scaleB = safeScale(target.b, currentBg.b);
+
+    const refHue = hueOf(currentBg.r, currentBg.g, currentBg.b);
+    const refSat = saturationOf(currentBg.r, currentBg.g, currentBg.b);
+
     for (let i = 0; i < pixels.length; i += channels) {
       const r = pixels[i];
       const g = pixels[i + 1];
@@ -416,14 +571,23 @@ export async function normalizeBackgroundColor(
       // color channels are corrected, transparency passes through as-is.
     }
 
-    const pipeline = applyFormat(
-      sharp(pixels, { raw: { width: info.width, height: info.height, channels } }),
-      format ?? inferFormat(input),
-    );
+    let pipeline: SharpPipeline = sharp(pixels, { raw: { width: info.width, height: info.height, channels } });
+    if (icc) {
+      // withIccProfile only accepts a filesystem path (or a built-in name),
+      // so the extracted profile bytes are spilled to a temp file. Since
+      // `pipeline` was built from a raw buffer with no profile of its own,
+      // this only tags the output — it does not run a colour transform
+      // (verified empirically; see the module doc comment).
+      iccTempPath = path.join(os.tmpdir(), `zit-calibrate-icc-${process.pid}-${randomUUID()}.icc`);
+      await fs.writeFile(iccTempPath, icc);
+      pipeline = pipeline.withIccProfile(iccTempPath);
+    }
+    pipeline = applyFormat(pipeline, format ?? inferFormat(input));
 
     const buffer = await pipeline.toBuffer();
     return { buffer, applied: { scaleR, scaleG, scaleB } };
   } finally {
+    if (iccTempPath) await fs.rm(iccTempPath, { force: true });
     await cleanup();
   }
 }

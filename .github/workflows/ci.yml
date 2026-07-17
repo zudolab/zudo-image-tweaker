@@ -56,3 +56,115 @@ jobs:
       # release.yml immediately before the real npm publish.
       - name: Check pack (verify published artifact)
         run: bash scripts/check-pack.sh
+
+      # publint checks the published package.json shape (exports map, files
+      # list, types resolution) against npm/bundler expectations. Runs the
+      # locally pinned devDependency via `pnpm exec` — package.json/lockfile
+      # are frozen, so no new dependency is added here.
+      - name: publint (package.json validity)
+        run: pnpm -F @takazudo/zudo-image-tweaker exec publint
+
+      # attw verifies the TypeScript types resolve correctly for every module
+      # resolution mode a consumer might use. --pack builds a real tarball
+      # first, same as check-pack.sh. This package is ESM-only, so the
+      # built-in "strict" profile's node10/CJS-resolution checks are moot —
+      # `--profile esm-only` scopes the gate to resolution modes that
+      # actually apply, instead of a permanently-red CJS complaint.
+      - name: attw (types resolution across module modes)
+        run: pnpm -F @takazudo/zudo-image-tweaker exec attw --pack . --profile esm-only
+
+  browser-orientation-smoke:
+    name: Browser orientation smoke test (real Chrome pixels)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # jsdom can't implement Canvas/ImageBitmap, so the vitest suite can only
+      # assert bakeOrientation *calls* createImageBitmap correctly — never
+      # that the browser's own `imageOrientation: 'from-image'` handling is
+      # actually correct (issue #52). This drives the preinstalled system
+      # Chrome over CDP (no puppeteer/playwright dependency — package.json is
+      # frozen) to verify all 8 EXIF orientations against real pixels.
+      - name: Real-browser orientation pixel verification
+        run: node scripts/browser-orientation-smoke.mjs
+        working-directory: packages/zit
+
+  macos-sips:
+    name: Test with real sips (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Runs on a real macOS runner so the heif/calibrate `sips` code paths
+      # actually execute against the real binary (issue #37) — the
+      # ubuntu-only matrix above only ever exercises the ENOENT/non-macOS
+      # fallback branch, never the sips-success path.
+      - name: Test heif + calibrate (real sips)
+        run: pnpm -F @takazudo/zudo-image-tweaker exec vitest run src/heif src/calibrate
+
+  doc-examples:
+    name: Doc examples anti-drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+
+      # doc/examples-check/tsconfig.json maps every subpath import straight at
+      # packages/zit/dist/**/*.d.ts (plus packages/zit/node_modules/sharp for
+      # re-exported sharp types), so the root workspace must be installed and
+      # packages/zit built in THIS job before check:examples can resolve
+      # anything — this job runs on its own clean checkout, it does not
+      # inherit the build-and-check job's build output.
+      - name: Install root workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages/zit
+        run: pnpm -F @takazudo/zudo-image-tweaker build
+
+      # doc/ is a standalone create-zudo-doc project outside the pnpm
+      # workspace (deliberate — see root CLAUDE.md), so it gets its own
+      # install scoped to -C doc rather than joining `pnpm install` above.
+      - name: Install doc dependencies
+        run: pnpm -C doc install --frozen-lockfile
+
+      # Anti-drift gate: type-checks the doc site's embedded code examples
+      # against the real package types, so a signature change in packages/zit
+      # that the docs forgot to update fails CI instead of shipping stale docs.
+      - name: Check doc examples
+        run: pnpm -C doc check:examples

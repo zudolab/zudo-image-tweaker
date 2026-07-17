@@ -245,6 +245,20 @@ describe('processImages — animated __ogonly reports animation', () => {
   });
 });
 
+// Deep-review finding — validate the format before the FormatEnum cast.
+describe('processImages — an unsupported output format', () => {
+  it('reports a clear variants-stage error instead of an opaque sharp cast failure', async () => {
+    await writeJpeg('x.jpg', 400, 400);
+
+    const summary = await processImages({ inputDir, outputDir, formats: ['bogus'] });
+
+    expect(summary.results).toEqual([]);
+    expect(summary.failed).toHaveLength(1);
+    expect(summary.failed[0]).toMatchObject({ slug: 'x', stage: 'variants' });
+    expect(summary.failed[0].error).toMatch(/unsupported output format "bogus"/);
+  });
+});
+
 // Cache-shape note (fixes 3 + 4) — an older-format entry lacking `mode`.
 describe('processImages — pre-mode (older-format) cache entries', () => {
   it('treats an entry without a mode field as a miss and reprocesses without crashing', async () => {
