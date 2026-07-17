@@ -1,0 +1,78 @@
+---
+title: Installation
+sidebar_position: 2
+---
+
+## Requirements
+
+- Node.js 22.12.0 or later
+- pnpm, npm, or yarn (any package manager works — the notes below apply specifically to pnpm 10/11)
+
+## Install the package
+
+:::code-group{name="package-manager"}
+
+```sh title="pnpm"
+pnpm add @takazudo/zudo-image-tweaker
+```
+
+```sh title="npm"
+npm install @takazudo/zudo-image-tweaker
+```
+
+```sh title="yarn"
+yarn add @takazudo/zudo-image-tweaker
+```
+
+:::
+
+`sharp` is the only regular (always-installed) native dependency. `@imgly/background-removal-node`
+(used by `/product-photo`), `exifr`, and `heic2any` (both used by `/browser`) are optional peer
+dependencies, dynamic-imported only by the modules that need them — install them only if you use
+those modules. See [Security & Heavy Dependencies](../guides/security-and-heavy-deps.mdx) for what
+each one costs.
+
+:::warning[pnpm 10/11: approve sharp's build script]
+
+pnpm 10 and 11 block dependency lifecycle scripts by default (`strictDepBuilds`) as a supply-chain
+countermeasure. `sharp` needs its install script to run — it fetches the platform-specific `libvips`
+binary — so after `pnpm add` you'll see a warning like:
+
+```
+Ignored build scripts: sharp@0.35.3.
+Run "pnpm approve-builds" to pick which dependencies should be allowed to run scripts.
+```
+
+Until it's approved, `sharp` has no native binding to load and every module in this package throws
+on import. Approve it either interactively:
+
+```sh
+pnpm approve-builds
+```
+
+or declare it up front in your project's `pnpm-workspace.yaml` (pnpm 11's `allowBuilds` per-package
+map, which replaced pnpm 10's `onlyBuiltDependencies` list):
+
+```yaml title="pnpm-workspace.yaml"
+allowBuilds:
+  sharp: true
+```
+
+:::
+
+## Import forms
+
+Most exports are reachable both from the flat root import and from their dedicated subpath. Three
+names (`ImageInput`, `Orientation`, `deriveOrientation`) are ambiguous across modules and are
+resolved explicitly in the root barrel — see the [Configuration](../guides/configuration.mdx) guide
+and each module's own reference page for the full export list.
+
+```ts
+// Root import — convenient for consumers that use several modules.
+import { processImages } from '@takazudo/zudo-image-tweaker';
+
+// Subpath import — pulls in only this module's code paths and dependencies.
+import { processImages } from '@takazudo/zudo-image-tweaker/variants';
+```
+
+Continue to [Quick Start](./quick-start.mdx) to run your first pipeline.

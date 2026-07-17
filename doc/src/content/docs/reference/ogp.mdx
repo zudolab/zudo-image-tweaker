@@ -1,0 +1,95 @@
+---
+title: ogp
+description: Social-card (Open Graph / Twitter card) image compositor.
+sidebar_position: 4
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/ogp` composites a source image into a fixed-size
+social card (1200×630 by default) suitable for Open Graph / Twitter card
+meta tags. It offers two compositing strategies plus a dispatcher that picks
+between them by aspect ratio.
+
+## Exports
+
+```ts
+function generateOgpImage(input: OgpInput, opts?: OgpImageOptions): Promise<OgpResult>;
+function generateOgpFromLandscape(
+  input: OgpInput,
+  opts?: OgpFromLandscapeOptions,
+): Promise<OgpResult>;
+function generateSmartOgp(input: OgpInput, opts?: SmartOgpOptions): Promise<SmartOgpResult>;
+
+type OgpInput = string | Buffer;
+```
+
+- **`generateOgpImage`** — a blurred, desaturated cover-crop background with
+  top/bottom gradient overlays, a drop shadow, and a centered square card
+  (optionally rounded-corner masked). Best suited to square/portrait
+  sources.
+- **`generateOgpFromLandscape`** — a plain cover-crop to the target canvas,
+  no compositing. Best suited to already-landscape sources, where a
+  blurred-background card would waste detail.
+- **`generateSmartOgp`** — dispatches to one of the two above based on the
+  source's (EXIF-oriented) aspect ratio, and tags the result with which
+  branch ran.
+
+## Options
+
+`OgpImageOptions` extends the base options below; `generateOgpFromLandscape`
+takes only the base options; `SmartOgpOptions` extends `OgpImageOptions`
+with `landscapeThreshold`.
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `width` | `number` | `1200` | Output canvas width. |
+| `height` | `number` | `630` | Output canvas height. |
+| `quality` | `number` | `85` | JPEG quality (1-100). |
+| `progressive` | `boolean` | `true` | Progressive JPEG encoding. |
+| `outPath` | `string` | — | Also writes the result to this path; the result then carries `path`. |
+| `foregroundSize` | `number` | `min(600, width, height)` | Size of the centered square card. `generateOgpImage` only. |
+| `cornerRadius` | `number` | `0` | Corner radius on the card, applied via an SVG mask. `0` skips masking. `generateOgpImage` only. |
+| `blurSigma` | `number` | `45` | Gaussian blur sigma for the background. `generateOgpImage` only. |
+| `desaturate` | `number` | `0.1` | Background desaturation, `0`-`1`. `generateOgpImage` only. |
+| `topGradientOpacity` | `number` | `0.3` | Top gradient darkness, `0`-`1`. `generateOgpImage` only. |
+| `bottomGradientOpacity` | `number` | `0.2` | Bottom gradient darkness, `0`-`1`. `generateOgpImage` only. |
+| `gradientTopHeight` | `number` | `0.25` | Fraction of canvas height the top gradient covers. `generateOgpImage` only. |
+| `gradientBottomHeight` | `number` | `0.25` | Fraction of canvas height the bottom gradient covers. `generateOgpImage` only. |
+| `shadowOpacity` | `number` | `0.25` | Drop shadow opacity, `0`-`1`. `generateOgpImage` only. |
+| `shadowBlur` | `number` | `24` | Drop shadow blur radius. `generateOgpImage` only. |
+| `shadowOffsetY` | `number` | `8` | Vertical drop shadow offset. `generateOgpImage` only. |
+| `landscapeThreshold` | `number` | `1.5` | Aspect ratio (width / height) at or above which `generateSmartOgp` dispatches to the landscape branch. `generateSmartOgp` only. |
+
+`OgpResult` carries `buffer`, `width`, `height`, `format: 'jpeg'`, and
+`path?` (present only when `outPath` was passed). `SmartOgpResult` adds
+`method: 'landscape' | 'composite'`.
+
+## Example
+
+```ts
+import { generateSmartOgp } from '@takazudo/zudo-image-tweaker/ogp';
+
+const result = await generateSmartOgp('./cover.jpg', {
+  outPath: './public/og/cover.jpg',
+  landscapeThreshold: 1.5,
+});
+
+console.log(`${result.method}: ${result.width}x${result.height}, wrote to ${result.path}`);
+```
+
+## Caveats
+
+- **Output is always JPEG.** `OgpResult.format` is the literal `'jpeg'` —
+  there's no PNG/WebP option.
+- **Dispatch uses the *displayed* aspect ratio.** `generateSmartOgp` reads
+  `metadata.autoOrient` (falling back to the raw `width`/`height`) so a
+  portrait photo stored sideways with an EXIF rotation flag still dispatches
+  correctly.
+- **`foregroundSize` auto-caps to the canvas.** The default is
+  `min(600, width, height)` specifically so the card never exceeds a
+  caller-shrunk canvas — sharp rejects a composite layer larger than its
+  base image. An explicit `foregroundSize` you pass is *not* clamped;
+  setting it larger than the canvas will throw.
+- **`outPath` is a side effect in addition to the return value** — the
+  buffer is always returned regardless of whether `outPath` was set.

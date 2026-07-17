@@ -1,0 +1,50 @@
+# Cloudflare Workers Static Assets configuration
+
+name = "zudo-image-tweaker"
+compatibility_date = "2024-12-01"
+
+# Pure-assets deploy: `pnpm -C doc build` (the zfb static-site build, no
+# server adapter attached) produces no dist/_worker.js. There is no worker
+# script to run, so `main`, `compatibility_flags = ["nodejs_compat"]` (only
+# needed to load a Node-API worker bundle), and the [assets] `binding` (only
+# valid when a worker script reads it) are all omitted. If a future adapter
+# change starts emitting dist/_worker.js, re-add all three plus a deploy-time
+# .assetsignore excluding _worker.js (see zudo-cloudflare-wisdom's
+# wrangler.toml for the worker-script variant of this config).
+
+# Top-level fields (MUST stay above the [assets] table — in TOML any key after
+# a table header is scoped into that table; if these sit under [assets] wrangler
+# warns "Unexpected fields found in assets field" and silently ignores them).
+#
+# workers_dev/preview_urls are both disabled: this site is served only on the
+# custom domain below, and preview_urls requires workers_dev = true to
+# actually route (edge otherwise rejects the workers.dev preview URL with
+# "error code: 1042") — enabling it alone would be a dead setting.
+workers_dev = false
+preview_urls = false
+
+# ---------------------------------------------------------------------------
+# Static asset serving
+#
+# not_found_handling = "404-page" serves dist/404.html for unmatched GETs.
+#
+# run_worker_first = false means the asset layer serves matching requests
+# directly; with no worker script attached (see note above) this is the only
+# valid setting.
+#
+# No `binding` here: wrangler rejects an asset binding on an assets-only
+# Worker ("Cannot use assets with a binding in an assets-only Worker") — a
+# binding only makes sense when a worker script (`main`) reads env.ASSETS.
+# ---------------------------------------------------------------------------
+[assets]
+directory = "./dist"
+not_found_handling = "404-page"
+run_worker_first = false
+
+# ---------------------------------------------------------------------------
+# Custom domain routing
+# route host MUST equal zfb.config.ts's siteUrl host
+# ---------------------------------------------------------------------------
+[[routes]]
+pattern = "zudo-image-tweaker.takazudomodular.com"
+custom_domain = true

@@ -1,0 +1,126 @@
+{
+  "name": "@takazudo/zudo-image-tweaker",
+  "version": "0.1.0",
+  "description": "sharp-based image-tweaking toolkit: variants, HEIF conversion, OGP cards, byte-budget encoding, square crops, product-photo background removal, calibration, compositing, blurhash, EXIF, and browser upload prep.",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "author": "Takeshi Takatsudo <takazudo@gmail.com> (https://github.com/Takazudo)",
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zudolab/zudo-image-tweaker.git",
+    "directory": "packages/zit"
+  },
+  "homepage": "https://github.com/zudolab/zudo-image-tweaker",
+  "bugs": {
+    "url": "https://github.com/zudolab/zudo-image-tweaker/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./variants": {
+      "types": "./dist/variants/index.d.ts",
+      "import": "./dist/variants/index.js"
+    },
+    "./heif": {
+      "types": "./dist/heif/index.d.ts",
+      "import": "./dist/heif/index.js"
+    },
+    "./ogp": {
+      "types": "./dist/ogp/index.d.ts",
+      "import": "./dist/ogp/index.js"
+    },
+    "./budget": {
+      "types": "./dist/budget/index.d.ts",
+      "import": "./dist/budget/index.js"
+    },
+    "./square": {
+      "types": "./dist/square/index.d.ts",
+      "import": "./dist/square/index.js"
+    },
+    "./product-photo": {
+      "types": "./dist/product-photo/index.d.ts",
+      "import": "./dist/product-photo/index.js"
+    },
+    "./calibrate": {
+      "types": "./dist/calibrate/index.d.ts",
+      "import": "./dist/calibrate/index.js"
+    },
+    "./composite": {
+      "types": "./dist/composite/index.d.ts",
+      "import": "./dist/composite/index.js"
+    },
+    "./blurhash": {
+      "types": "./dist/blurhash/index.d.ts",
+      "import": "./dist/blurhash/index.js"
+    },
+    "./exif": {
+      "types": "./dist/exif/index.d.ts",
+      "import": "./dist/exif/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12.0",
+    "pnpm": ">=11.0.0"
+  },
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "prepublishOnly": "pnpm build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "sharp": "^0.35.3",
+    "blurhash": "^2.0.5",
+    "xxhash-wasm": "^1.1.0",
+    "heic-decode": "^2.1.0"
+  },
+  "peerDependencies": {
+    "@imgly/background-removal-node": "^1.4.5",
+    "exifr": "^7.1.3",
+    "heic2any": "^0.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@imgly/background-removal-node": {
+      "optional": true
+    },
+    "exifr": {
+      "optional": true
+    },
+    "heic2any": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@imgly/background-removal-node": "^1.4.5",
+    "@types/node": "^22.0.0",
+    "exifr": "^7.1.3",
+    "heic2any": "^0.0.4",
+    "jsdom": "^25.0.0",
+    "publint": "0.3.21",
+    "typescript": "^5.6.0",
+    "vite": "^7.3.2",
+    "vitest": "^4.1.4"
+  }
+}

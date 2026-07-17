@@ -1,0 +1,106 @@
+---
+title: heif
+description: HEIC/HEIF to JPEG conversion with ICC profile preservation.
+sidebar_position: 3
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/heif` converts a HEIC/HEIF source to JPEG. On
+macOS it prefers the system `sips` binary for speed with no extra
+dependencies; everywhere else — or whenever `sips` is unavailable or fails —
+it falls back to a Node-native decoder (`heic-decode`, WASM `libheif-js`)
+plus a dependency-free ISOBMFF box parser that pulls the source's ICC
+profile straight out of the container and splices it into the output JPEG.
+
+## Exports
+
+```ts
+function convertHeifToJpeg(
+  input: string | Buffer,
+  opts?: ConvertHeifToJpegOptions,
+): Promise<ConvertHeifResult>;
+
+function convertHeifToJpegNode(
+  input: string | Buffer,
+  opts?: ConvertHeifToJpegOptions,
+): Promise<ConvertHeifResult>;
+
+function extractIccFromHeif(buffer: Buffer): Buffer | null;
+```
+
+`convertHeifToJpeg` is the entry point most callers want: it tries `sips`
+first (file-path input only, macOS only), then falls back to
+`convertHeifToJpegNode`. Call `convertHeifToJpegNode` directly to force the
+Node/WASM path (e.g. to skip the `sips` attempt on a Buffer input, which
+already always uses the Node path). `extractIccFromHeif` is the low-level
+ICC-profile extractor `convertHeifToJpegNode` uses internally; it's exported
+for callers who only need the profile bytes.
+
+## Options
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `quality` | `number` | `90` | JPEG encode quality, 1-100. |
+| `maxInputBytes` | `number` | `268435456` (256 MiB) | Reject inputs larger than this many bytes *before* decoding. |
+
+`ConvertHeifResult` shape:
+
+```ts
+interface ConvertHeifResult {
+  buffer: Buffer;
+  width: number;
+  height: number;
+  /** Whether a source ICC profile was found and embedded in the output. */
+  iccApplied: boolean;
+}
+```
+
+## Example
+
+```ts
+import { convertHeifToJpeg } from '@takazudo/zudo-image-tweaker/heif';
+
+const { buffer, width, height, iccApplied } = await convertHeifToJpeg('./photo.heic', {
+  quality: 90,
+});
+
+console.log(`${width}x${height}, icc applied: ${iccApplied}, ${buffer.length} bytes`);
+```
+
+## Caveats
+
+:::danger[Trusted input only]
+The Node/WASM fallback decoder (`heic-decode` → bundled `libheif-js`
+1.19.8) predates the libheif 1.22.0 fixes for CVE-2026-32740 (heap overflow)
+and CVE-2026-32739 (infinite-loop DoS). **Only decode HEIC/HEIF files from
+sources you trust.** The decoder runs inside a WASM sandbox and
+`maxInputBytes` rejects oversized inputs before they reach it, but both are
+defense-in-depth, not a substitute for trusting the source.
+:::
+
+- **`sips` is only tried for a file-path `input`.** A `Buffer` input always
+  goes through the Node/WASM path, even on macOS.
+- **HDR "gain map" (`tmap`) files force the Node fallback on some macOS
+  hosts.** System libheif versions before 1.18.0 (what `sips` and sharp's
+  bundled libvips use) hardcode a strict auxiliary-image-reference limit
+  that rejects gain-map HEIC files from recent iPhone/Android cameras
+  ("Too many auxiliary image references"). The bundled WASM decoder doesn't
+  carry that limit, so `sips` failing on such a file is expected and the
+  Node path picks it up automatically.
+- **The ICC profile is spliced in as a raw APP2 marker**, not applied via
+  sharp's `withIccProfile()` — the decoded pixels are already in the space
+  the extracted profile describes, so a color-managed transform would alter
+  already-correct samples instead of just tagging them.
+- **Multi-image containers: a documented edge case.** `heic-decode`'s
+  default export decodes the *first* top-level image in the container, not
+  necessarily the item marked primary in the `pitm` box (which is what the
+  ICC extractor targets). This is a non-issue for single-image consumer
+  photos, including HDR gain-map files (the gain map is an auxiliary
+  reference on the same item, not a separate top-level image) — but a
+  multi-image container whose primary item isn't first would decode the
+  wrong image while attaching the correct image's ICC profile to it.
+- **Only the first `ipma` box is consulted** when walking the container's
+  item-property associations. ISOBMFF technically permits more than one,
+  but every real-world file this was validated against — including
+  camera-generated HDR gain-map files — carries a single one.

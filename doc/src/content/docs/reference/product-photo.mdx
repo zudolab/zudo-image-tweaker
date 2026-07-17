@@ -1,0 +1,163 @@
+---
+title: product-photo
+description: Background removal, alpha trim, and background compositing with procedural shadow synthesis for product photography.
+sidebar_position: 8
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/product-photo` builds a product-photography
+pipeline out of three steps: ML background removal, transparent-padding
+trim, and compositing the cutout onto a background canvas — optionally with
+synthesized drop shadows so a flat cutout reads as sitting on (or floating
+above) a surface.
+
+## Exports
+
+```ts
+function removeBackground(input: ImageInput | URL): Promise<Buffer>;
+function alphaTrim(input: ImageInput, options?: AlphaTrimOptions): Promise<Buffer>;
+function composeProductPhoto(
+  subject: ImageInput,
+  options: ComposeProductPhotoOptions,
+): Promise<ComposeProductPhotoResult>;
+function generateShadowLayers(
+  alphaImage: string | Buffer,
+  options?: GenerateShadowLayersOptions,
+): Promise<ShadowLayer[]>;
+
+type ImageInput = string | Buffer;
+```
+
+- **`removeBackground`** — segments the subject out of its background,
+  returning an RGBA PNG buffer. See [Optional peer dependency](#optional-peer-dependency)
+  below.
+- **`alphaTrim`** — crops fully-transparent padding down to the opaque/semi-opaque
+  content of an image with an alpha channel.
+- **`composeProductPhoto`** — the compositor: fits a subject (typically the
+  output of `removeBackground` + `alphaTrim`) into a centered container on a
+  background canvas, with an optional shadow pass.
+- **`generateShadowLayers`** — the low-level shadow/vignette layer generator
+  `composeProductPhoto` calls internally when `shadow` is set; exported for
+  callers who want the raw layers instead of a finished composite.
+
+## Optional peer dependency
+
+`removeBackground` dynamic-imports `@imgly/background-removal-node`, an
+ONNX-based ML model (~80MB download on first use), so consumers who never
+call it never pay that cost. Install it only if you use `removeBackground`:
+
+```sh
+pnpm add @imgly/background-removal-node
+```
+
+```ts
+interface OptionalPeerMissingError extends Error {
+  code: 'ERR_OPTIONAL_PEER_MISSING';
+}
+```
+
+:::warning[Error contract: ERR_OPTIONAL_PEER_MISSING]
+When the peer isn't installed, `removeBackground` rejects with an `Error`
+carrying `code: 'ERR_OPTIONAL_PEER_MISSING'` and a message that includes the
+install command, matching the `OptionalPeerMissingError` shape above. The
+detection walks the error's `cause` chain (up to 5 levels) looking for a
+Node module-resolution failure whose missing specifier is exactly
+`@imgly/background-removal-node` — so a missing *transitive* dependency of
+the peer (e.g. one of its own native bindings) surfaces as its own distinct
+error instead of being misreported as "the peer itself isn't installed."
+:::
+
+See [Security & Heavy Dependencies](../guides/security-and-heavy-deps.mdx)
+for what the ~80MB model download means for constrained or cold-start
+environments, and [Installation](../getting-started/installation.mdx) for
+the general optional-peer pattern this package uses.
+
+## Options
+
+### `composeProductPhoto`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `background` | `ImageInput \| { color: Color }` | *required* | Background image/path/Buffer, or a flat-color fill (`Color` is sharp's own color type). |
+| `size` | `number` | `1600` | Canvas size (square), in px. |
+| `fit` | `number` | `Math.round(size * 0.9)` | Size the subject is fit within (`'contain'`), centered on the canvas. Scales with a custom `size` rather than staying pinned to `1440`. |
+| `quality` | `number` | `90` | JPEG encode quality, 1-100. |
+| `shadow` | `boolean \| GenerateShadowLayersOptions` | `false` | Adds synthesized shadow/vignette layers. `true` uses shadow defaults; pass an options object to tune them (see [Shadow modes](#shadow-modes) below). |
+
+`ComposeProductPhotoResult`: `{ buffer, width, height, format: 'jpeg' }`.
+
+### `alphaTrim`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `threshold` | `number` | `10` | Alpha threshold (of `sharp`'s `trim`) below which a pixel counts as background to be trimmed away. |
+
+## Shadow modes
+
+`GenerateShadowLayersOptions.mode` picks between two lighting setups, both
+using a fixed upper-left light direction. Each layer group accepts a
+`Partial<...>` override of its own tuning shape (`ShadowTuning`,
+`BottomShadowTuning`, `ProjectedShadowTuning`, `VignetteTuning`); the table
+below lists the shipped defaults.
+
+**`'grounded'`** (default) — a vignette, two bottom-fade shadows, and a
+tight contact shadow, as if the subject sits flush on the surface below it.
+
+| Layer | Param | Default |
+|---|---|---|
+| `vignette` | `lightX` / `lightY` / `strength` / `spread` | `0.3` / `0.25` / `0.12` / `1.3` |
+| `bottomShadows[0]` | `blur` / `opacity` / `offsetX` / `offsetY` / `fadeStartRatio` | `100` / `0.25` / `10` / `8` / `-0.1` |
+| `bottomShadows[1]` | `blur` / `opacity` / `offsetX` / `offsetY` / `fadeStartRatio` | `40` / `0.35` / `8` / `6` / `0.0` |
+| `contactShadow` | `blur` / `opacity` / `offsetX` / `offsetY` | `8` / `0.55` / `4` / `3` |
+
+**`'floating'`** — adds a `projectedShadow` (a squashed, offset drop shadow
+suggesting the subject hovers above the surface) on top of larger-offset
+bottom-fade and contact shadows.
+
+| Layer | Param | Default |
+|---|---|---|
+| `vignette` | `lightX` / `lightY` / `strength` / `spread` | `0.3` / `0.25` / `0.12` / `1.3` (same as grounded) |
+| `projectedShadow` | `squash` / `offsetX` / `offsetY` / `blur` / `opacity` | `0.25` / `65` / `35` / `75` / `0.45` |
+| `bottomShadows[0]` | `blur` / `opacity` / `offsetX` / `offsetY` / `fadeStartRatio` | `120` / `0.3` / `62` / `55` / `-0.1` |
+| `bottomShadows[1]` | `blur` / `opacity` / `offsetX` / `offsetY` / `fadeStartRatio` | `52` / `0.45` / `58` / `50` / `0.0` |
+| `contactShadow` | `blur` / `opacity` / `offsetX` / `offsetY` | `12` / `0.5` / `55` / `45` |
+
+`bottomShadows` in `GenerateShadowLayersOptions` is an array of two
+`Partial<BottomShadowTuning> | undefined` overrides, positionally merged
+onto the mode's two defaults above.
+
+## Example
+
+```ts
+import { removeBackground, alphaTrim, composeProductPhoto } from '@takazudo/zudo-image-tweaker/product-photo';
+
+const cutout = await removeBackground('./product.jpg');
+const trimmed = await alphaTrim(cutout);
+const { buffer, width, height } = await composeProductPhoto(trimmed, {
+  background: { color: '#ffffff' },
+  shadow: { mode: 'grounded' },
+});
+
+console.log(`${width}x${height}, ${buffer.length} bytes`);
+```
+
+## Caveats
+
+- **`composeProductPhoto` requires `background`.** Omitting it throws
+  immediately rather than defaulting to a blank canvas.
+- **`generateShadowLayers` expects a canvas-sized, pre-positioned subject.**
+  Its `alphaImage` must already be the full canvas with the subject
+  composited at its final position — each returned `ShadowLayer.offset` is
+  always `{ x: 0, y: 0 }` because the layer itself is already sized and
+  positioned to match. `composeProductPhoto` builds this full-canvas image
+  internally before calling it.
+- **Layers composite back-to-front:** background, then shadow/vignette
+  layers, then the subject on top — all shadow layers blend with
+  `'multiply'`.
+- **Upper-left is the shipped default light direction**, not a fixed,
+  unchangeable one — there's no single "light direction" knob, but you can
+  shift the apparent lighting by overriding `vignette.lightX`/`lightY`
+  (moves the bright center) and the shadow layers' own `offsetX`/`offsetY`
+  (moves where each shadow falls) together, consistently, for both
+  `'grounded'` and `'floating'` modes.

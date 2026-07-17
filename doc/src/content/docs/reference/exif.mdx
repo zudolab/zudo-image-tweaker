@@ -1,0 +1,74 @@
+---
+title: exif
+description: EXIF orientation, metadata, and date-parsing utilities.
+sidebar_position: 7
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/exif` is a small set of standalone utilities
+for EXIF-related concerns other modules build on: baking orientation into
+pixels, stripping metadata, classifying an image's orientation, parsing an
+EXIF capture date, and filtering a width ladder against a source's own
+width.
+
+## Exports
+
+```ts
+function parseExifDate(buffer: Buffer | Uint8Array | null | undefined): Date | null;
+function bakeOrientation(input: SharpInput): Promise<Buffer>;
+function stripExif(input: SharpInput): Promise<Buffer>;
+function deriveOrientation(width: number, height: number): Orientation;
+function pickVariantWidths(srcWidth: number, widths: number[]): number[];
+
+type Orientation = 'landscape' | 'portrait' | 'square';
+```
+
+`SharpInput` is sharp's own accepted-input type (`string | Buffer |
+ArrayBuffer | Uint8Array | Uint8ClampedArray`).
+
+## Parameters
+
+None of these five take an options object — each is a plain function over
+its input(s).
+
+| Export | Parameters | Returns | Effect |
+|---|---|---|---|
+| `parseExifDate` | `buffer: Buffer \| Uint8Array \| null \| undefined` | `Date \| null` | Finds the first `DateTimeOriginal`/`DateTime`-shaped timestamp in a raw EXIF buffer. `null` when none is found or the buffer is empty/nullish. |
+| `bakeOrientation` | `input: SharpInput` | `Promise<Buffer>` | Physically rotates/flips pixel data to match the EXIF `Orientation` tag, then re-encodes *without* metadata. |
+| `stripExif` | `input: SharpInput` | `Promise<Buffer>` | Re-encodes with all metadata (EXIF, ICC, XMP, …) removed, *without* altering pixel orientation. |
+| `deriveOrientation` | `width: number, height: number` | `Orientation` | Classifies a dimension pair as `'landscape'`, `'portrait'`, or `'square'`. Throws on non-finite or non-positive input. |
+| `pickVariantWidths` | `srcWidth: number, widths: number[]` | `number[]` | Filters `widths` down to those `<= srcWidth`, preserving input order. Returns `[]` for a non-finite or non-positive `srcWidth`. |
+
+## Example
+
+```ts
+import { readFile } from 'node:fs/promises';
+import { bakeOrientation, deriveOrientation, parseExifDate } from '@takazudo/zudo-image-tweaker/exif';
+
+const source = await readFile('./photo.jpg');
+const upright = await bakeOrientation(source);
+const orientation = deriveOrientation(3024, 4032);
+const takenAt = parseExifDate(Buffer.from('2026:03:10 08:15:22'));
+
+console.log(orientation, takenAt?.toISOString(), upright.length);
+```
+
+## Caveats
+
+- **`bakeOrientation` and `stripExif` are easy to confuse.** `bakeOrientation`
+  physically rotates pixels to match the orientation flag *and* drops
+  metadata; `stripExif` only drops metadata and leaves pixels exactly as
+  stored. Calling `stripExif` alone on a sideways-stored, EXIF-rotated photo
+  leaves it sideways once nothing downstream auto-orients from EXIF anymore.
+- **`parseExifDate` treats the timestamp as UTC.** EXIF ASCII date tags
+  (`DateTimeOriginal`/`DateTime`) are stored as `YYYY:MM:DD HH:MM:SS` with no
+  time zone — this is an intentional approximation that preserves the
+  wall-clock value, not a true UTC conversion.
+- **`parseExifDate` rejects out-of-range fields that `Date` would otherwise
+  silently roll over** (e.g. `2024:04:31` would become May 1st via the
+  native `Date` constructor) — a match on the pattern is not proof of a
+  real calendar date, so the parsed result must round-trip back to the
+  exact fields matched, or it returns `null`.
+- **`pickVariantWidths` never upscales** — it only ever removes widths
+  larger than the source, never adds or clamps one.

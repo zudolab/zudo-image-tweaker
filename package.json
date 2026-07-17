@@ -1,0 +1,28 @@
+{
+  "name": "zudo-image-tweaker",
+  "private": true,
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "pnpm -r --if-present lint",
+    "doc:dev": "pnpm -C doc dev",
+    "doc:build": "pnpm -C doc build",
+    "b4push": "bash scripts/run-b4push.sh",
+    "prepare": "lefthook install && bash scripts/install-git-hooks.sh"
+  },
+  "engines": {
+    "node": ">=22.12.0",
+    "pnpm": ">=11.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zudolab/zudo-image-tweaker.git"
+  },
+  "homepage": "https://github.com/zudolab/zudo-image-tweaker",
+  "devDependencies": {
+    "lefthook": "^2.1.10"
+  }
+}

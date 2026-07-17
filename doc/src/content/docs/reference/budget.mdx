@@ -1,0 +1,106 @@
+---
+title: budget
+description: Byte-budget encode ladder — resize and re-encode until an image fits under a byte-count ceiling.
+sidebar_position: 5
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/budget` encodes an image so its output stays
+under a byte-count ceiling, by progressively lowering quality — and, when
+quality alone isn't enough, width — until the result fits. It covers two
+shapes of this problem through one function, selected by whether
+`exactWidth` is set:
+
+- **Exact-width preset** (`exactWidth` set) — the output width is fixed
+  (smaller sources upscaled, larger ones downscaled), and quality steps down
+  across a small rung ladder. Defaults to PNG (with palette-quantization
+  rungs) when `format` is omitted, but an explicit `format: 'jpeg'` is
+  honored the same as in the step-down preset. Useful when a downstream
+  consumer requires an exact pixel width regardless of source size.
+- **Step-down preset** (`exactWidth` omitted) — the source's aspect ratio is
+  kept, output format auto-detects JPEG vs. PNG from the alpha channel, and
+  once the quality ladder at the current width is exhausted the width
+  itself steps down (down to `minWidth`) before the ladder is retried.
+  Useful when only a total byte ceiling matters, not an exact width.
+
+## Exports
+
+```ts
+function encodeUnderByteBudget(
+  input: Buffer | string,
+  options: EncodeUnderByteBudgetOptions,
+): Promise<BudgetResult>;
+
+type BudgetResult =
+  | {
+      ok: true;
+      buffer: Buffer;
+      format: 'jpeg' | 'png';
+      width: number;
+      quality: number;
+      bytes: number;
+      steps: Step[];
+    }
+  | {
+      ok: false;
+      reason: 'unreachable-budget' | 'animated-gif-skipped';
+      steps: Step[];
+    };
+
+interface Step {
+  width: number;
+  quality: number;
+  bytes: number;
+}
+```
+
+`encodeUnderByteBudget` never throws for an unreachable budget or an
+animated GIF input — both are reported through `BudgetResult.ok: false`.
+`input` accepts a `Buffer`, a local file path, or an `http(s)://` URL
+(fetched with the global `fetch`).
+
+## Options
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `maxBytes` | `number` | *required* | Byte-count ceiling the encoded output must not exceed. |
+| `format` | `'jpeg' \| 'png' \| 'auto'` | `'png'` when `exactWidth` is set and this is omitted; alpha-detection (`'auto'` behavior) otherwise | Explicit output format, or `'auto'` to detect from the source's alpha channel (PNG when present, JPEG otherwise). |
+| `exactWidth` | `number` | — | Fixed output width; enables the exact-width preset. Upscales smaller sources. |
+| `qualityLadder` | `number[]` | Exact-width: `[95, 85, 75, 65, 50]`. Step-down JPEG: `[90, 82, 75, 65, 55, 45, 35]`. Step-down PNG: `[100, 90, 80, 65, 50]` (`100` is a near-lossless sentinel — no explicit `quality` option is set to sharp). | Overrides the default quality rungs tried at each width. |
+| `minWidth` | `number` | `400` | Step-down preset only: width floor the step-down loop won't go below. |
+| `widthStepFactor` | `number` | `0.85` | Step-down preset only: multiplier applied to width on each step-down. |
+| `paletteQuantization` | `boolean` | `true` | Whether the lower quality rungs may engage PNG palette quantization. |
+
+## Example
+
+```ts
+import { encodeUnderByteBudget } from '@takazudo/zudo-image-tweaker/budget';
+
+const result = await encodeUnderByteBudget('./photo.jpg', { maxBytes: 200_000 });
+
+if (result.ok) {
+  console.log(`${result.format} @ ${result.width}px, ${result.bytes} bytes, quality ${result.quality}`);
+} else {
+  console.warn(`could not fit budget: ${result.reason}`);
+}
+```
+
+## Caveats
+
+- **Animated GIFs are always skipped**, returning
+  `{ ok: false, reason: 'animated-gif-skipped', steps: [] }` — they are
+  never re-encoded frame-by-frame.
+- **An unreachable budget doesn't throw.** If every rung of the ladder
+  (including the `minWidth` floor, in the step-down preset) still exceeds
+  `maxBytes`, the result is `{ ok: false, reason: 'unreachable-budget', steps }`
+  — `steps` records every attempt made, useful for diagnosing why.
+- **The first step-down attempt keeps the source's original size.** Width
+  only steps down *after* the quality ladder at the current width is
+  exhausted, so a source already under budget at full size and top quality
+  never gets resized.
+- **`format: 'auto'` (the step-down default) is decided once, from the
+  source's alpha channel** — not re-evaluated per rung.
+- **EXIF orientation is always baked in** before measuring/encoding
+  (`.rotate()`), so `width`/`steps[].width` reflect the *displayed*
+  dimensions, not necessarily the file's stored ones.

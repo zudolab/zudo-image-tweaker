@@ -1,0 +1,104 @@
+---
+title: composite
+description: Corner-anchored overlay compositing, single-shot or batched over a cartesian product of bases and overlays.
+sidebar_position: 10
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/composite` places a square overlay (a
+watermark, badge, or logo) in a corner of a base image, sized as a
+percentage of the base's width, plus a batch helper that composites every
+base against every overlay with bounded concurrency.
+
+## Exports
+
+```ts
+function compositeOverlay(
+  base: ImageInput,
+  overlay: ImageInput,
+  options: CompositeOverlayOptions,
+): Promise<CompositeOverlayResult>;
+function compositeBatch(
+  bases: CompositeBatchItem[],
+  overlays: CompositeBatchItem[],
+  options: CompositeBatchOptions,
+): Promise<CompositeBatchResult[]>;
+
+type ImageInput = SharpInput;
+type CompositePosition = 'bottom-right';
+```
+
+`SharpInput` is sharp's own accepted-input type (`string | Buffer |
+ArrayBuffer | Uint8Array | Uint8ClampedArray`).
+
+- **`compositeOverlay`** — a single base/overlay composite. The overlay is
+  always resized to a 1:1 square (`'cover'` fit) at `widthPercent` of the
+  base's width, then anchored to a corner with a `paddingPercent` gap.
+- **`compositeBatch`** — runs `compositeOverlay` over the cartesian product
+  of a `bases` list and an `overlays` list (every base × every overlay),
+  processed with a bounded-concurrency worker pool.
+
+## Options
+
+### `CompositeOverlayOptions`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `widthPercent` | `number` | *required* | Overlay width as a percentage (0-100) of the base image's width. The overlay is always forced to a 1:1 square at this size. |
+| `paddingPercent` | `number` | *required* | Gap from the base image's edges, as a percentage of the base's *width* — used for both the horizontal and vertical offset, even against a non-square base. |
+| `position` | `CompositePosition` | `'bottom-right'` | Corner to anchor to. `'bottom-right'` is the only value that ships in v1. |
+
+`CompositeOverlayResult`: `{ buffer, width, height }`.
+
+### `CompositeBatchOptions`
+
+Extends `CompositeOverlayOptions` with:
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `concurrency` | `number` | `4` | Max composites running at once. Must be a finite number `>= 1`. |
+
+`CompositeBatchItem`: `{ ref: string, image: ImageInput }` — `ref` is a
+caller-chosen identifier echoed back in the result (e.g. a filename or
+slug). `CompositeBatchResult`: `{ baseRef, overlayRef, result: CompositeOverlayResult }`.
+
+## Example
+
+```ts
+import { compositeBatch } from '@takazudo/zudo-image-tweaker/composite';
+
+const results = await compositeBatch(
+  [
+    { ref: 'photo-1', image: './photo-1.jpg' },
+    { ref: 'photo-2', image: './photo-2.jpg' },
+  ],
+  [{ ref: 'watermark', image: './watermark.png' }],
+  { widthPercent: 15, paddingPercent: 4 },
+);
+
+for (const { baseRef, overlayRef, result } of results) {
+  console.log(`${baseRef} + ${overlayRef}: ${result.width}x${result.height}`);
+}
+```
+
+## Caveats
+
+- **EXIF orientation is baked into the base before compositing** (via
+  sharp's `.rotate()`), and `width`/`height` in the result reflect the
+  *displayed* dimensions. `sharp`'s own `metadata()` always reports the
+  as-stored (pre-rotation) dimensions regardless, so orientation values 5-8
+  (which involve a 90deg turn) need a manual width/height swap internally
+  to match what `.rotate()` actually produces — `compositeOverlay` handles
+  this for you.
+- **Padding is always derived from the base's width on both axes**, even
+  for a non-square base — a tall, narrow base gets the same
+  `paddingPercent`-of-width gap vertically as it does horizontally, not a
+  height-relative one.
+- **A `widthPercent` that rounds to a non-positive pixel size throws**,
+  rather than silently producing a 0px (or negative) overlay.
+- **Only `'bottom-right'` ships in v1.** Passing any other `position` value
+  throws at runtime (the implementation is an exhaustive switch, ready for
+  more corners later).
+- **`compositeBatch` validates `concurrency` eagerly.** A non-finite or
+  `< 1` value throws immediately instead of silently defaulting or hanging.

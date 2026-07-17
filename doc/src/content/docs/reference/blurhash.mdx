@@ -1,0 +1,81 @@
+---
+title: blurhash
+description: Encode images into compact blurhash placeholder strings, and decode them back into tiny preview PNGs.
+sidebar_position: 11
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/blurhash` wraps the
+[blurhash](https://github.com/woltapp/blurhash) algorithm with sharp for
+downsampling and decoding, so a compact placeholder string can be encoded
+once and decoded back into a tiny preview image wherever it's needed (e.g.
+server-rendered as a `data:` URI while the full image loads).
+
+## Exports
+
+```ts
+function encodeImageToBlurhash(
+  input: SharpInput,
+  options?: EncodeImageToBlurhashOptions,
+): Promise<string>;
+function blurhashToDataUri(hash: string, options?: BlurhashToDataUriOptions): Promise<string>;
+function batchBlurhashToDataUri(
+  hashes: string[],
+  options?: BatchBlurhashToDataUriOptions,
+): Promise<string[]>;
+```
+
+- **`encodeImageToBlurhash`** — downsamples the source with sharp, then
+  feeds the raw RGBA pixels to the blurhash algorithm.
+- **`blurhashToDataUri`** — decodes a blurhash string into a small PNG,
+  base64-encoded as a `data:image/png;base64,...` URI.
+- **`batchBlurhashToDataUri`** — decodes many hashes at once, in bounded
+  chunks, preserving input order.
+
+## Options
+
+### `encodeImageToBlurhash`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `componentsX` | `number` | `4` | Horizontal component count. Must be an integer 1-9 — blurhash's own encoding scheme packs component counts into a single base83 size flag, which only has room for 1-9 per axis. |
+| `componentsY` | `number` | `4` | Vertical component count. Same 1-9 constraint as `componentsX`. |
+| `rawSize` | `number` | `32` | Size (both dimensions) the source is downsampled to (`fit: 'inside'`) before encoding. |
+
+### `blurhashToDataUri`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `size` | `number` | `16` | Output width and height, in pixels, of the decoded PNG. |
+
+### `batchBlurhashToDataUri`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `chunkSize` | `number` | `20` | Number of hashes decoded concurrently per batch. Must be a positive integer. |
+
+## Example
+
+```ts
+import { encodeImageToBlurhash, blurhashToDataUri } from '@takazudo/zudo-image-tweaker/blurhash';
+
+const hash = await encodeImageToBlurhash('./photo.jpg');
+const placeholder = await blurhashToDataUri(hash, { size: 24 });
+
+console.log(hash, placeholder.slice(0, 40));
+```
+
+## Caveats
+
+- **`componentsX`/`componentsY` outside 1-9, or non-integer, throw** rather
+  than silently clamping — blurhash's base83 size flag has no representation
+  for a count outside that range.
+- **`encodeImageToBlurhash` auto-orients per EXIF before hashing** (via
+  `.rotate()`), so the hash matches the visually upright image, not the
+  as-stored pixels.
+- **`batchBlurhashToDataUri` processes in chunks** (default `20`) so a large
+  batch doesn't spawn unbounded concurrent sharp work; output order always
+  matches input order regardless of chunking.
+- **`chunkSize` must be a positive integer** — zero, negative, or
+  non-integer values throw immediately.

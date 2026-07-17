@@ -1,0 +1,51 @@
+---
+title: External Binaries
+description: The file, magick, ffmpeg, and sips binaries this package feature-detects, and what happens without them.
+sidebar_position: 2
+---
+
+None of `file`, `magick`, `ffmpeg`, or `sips` are hard dependencies. Every one is feature-detected at
+runtime — probed via `execFile` with an argument array (never a shell string, so paths with spaces or
+shell metacharacters pass through unmangled) — and every code path that touches one degrades
+gracefully when it's absent, with one documented exception below (`/calibrate`'s HEIC handling).
+
+## `file`, `magick`, `ffmpeg` — used by `/variants`
+
+`/variants` probes these three independently (`hasFileBinary`, `hasMagick`, `hasFfmpeg`), each
+memoized for the lifetime of the process.
+
+**`file`** backs two heuristics in the engine's source-identification step:
+
+- Sniffing `.jpg`/`.jpeg` files that are secretly HEIF payloads — cameras and messaging apps
+  routinely hand these out under a `.jpg` name. Without `file`, only the `.heic`/`.heif` extension is
+  trusted; a mislabeled `.jpg` HEIF file is processed as a (corrupt) JPEG instead.
+- Guarding against non-image files saved with an image extension (an HTML error page or plain-text
+  response downloaded to `photo.jpg`). Without `file`, this guard never trips — nothing gets skipped
+  as "not an image," and a non-image input proceeds to fail later at the decode stage instead.
+
+**`magick` and `ffmpeg`** back `repairCorruptedImage`, invoked automatically (`autoRepair: true` by
+default — see [Configuration](./configuration.mdx)) when a decode error matches a known
+libvips/sharp corruption signature (premature end, bad Huffman, corrupt JPEG, libspng read error).
+`magick` is tried first, then `ffmpeg`, each only if feature-detected. **On plain Linux without
+ImageMagick or ffmpeg installed, repair is skipped**: the engine logs a `console.warn` and returns
+`null` rather than failing outright — a missing optional binary must never break a run on its own.
+If the source genuinely can't be repaired without one of these tools, the original decode error
+still propagates, since repair yielding nothing is not itself a failure signal.
+
+## `sips` — macOS only, used by `/heif` and `/calibrate`
+
+`sips` is macOS's built-in image tool. Both modules that touch HEIC/HEIF invoke it the same
+`execFile`-array way, but their fallback behavior differs:
+
+- **`/heif`'s `convertHeifToJpeg`** tries `sips` first (only for file-path input, for speed with no
+  extra dependencies), then **falls back to a Node/WASM decoder** (`heic-decode`) whenever `sips` is
+  unavailable (non-macOS — this is the path always taken on plain Linux), fails for any reason
+  (including a documented libheif auxiliary-image-reference limit that rejects HDR "gain map" HEIC
+  files from recent iPhone/Android cameras), or the input is a `Buffer` rather than a path. See
+  [Security & Heavy Dependencies](./security-and-heavy-deps.mdx) for the trust caveat on that
+  fallback decoder.
+- **`/calibrate`'s `sampleBackgroundColor` / `normalizeBackgroundColor`** carry no Node-native HEIC
+  decoder at all — `sips` is their *only* HEIC/HEIF decode path. On any platform where `sips` is
+  unavailable (Linux, Windows), both functions throw a descriptive error for `.heic`/`.heif` string
+  input, instructing the caller to pre-convert via the sibling `/heif` module first. `Buffer` input
+  bypasses this check entirely — only a string path is inspected for a `.heic`/`.heif` extension.

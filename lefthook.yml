@@ -1,0 +1,10 @@
+# lefthook manages pre-commit hooks here. Add commands under
+# `pre-commit.commands` when this repo needs them, e.g. lint-staged.
+#
+# The pre-push worktree guard is intentionally NOT managed by lefthook —
+# it lives in scripts/hooks/pre-push and is installed directly to
+# .git/hooks/pre-push by scripts/install-git-hooks.sh (run by `pnpm install`
+# via the `prepare` script).
+
+pre-commit:
+  commands: {}

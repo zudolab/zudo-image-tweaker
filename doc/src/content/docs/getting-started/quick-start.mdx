@@ -1,0 +1,67 @@
+---
+title: Quick Start
+sidebar_position: 3
+---
+
+## Process a directory of images
+
+The `/variants` module is the toolkit's core entry point: point it at a source directory and it
+writes a responsive width ladder (plus an optional OGP card) per image, with a content-hash cache so
+reruns skip anything already processed.
+
+```ts
+import { processImages } from '@takazudo/zudo-image-tweaker/variants';
+
+const summary = await processImages({
+  inputDir: './source-photos',
+  outputDir: './public/images',
+});
+
+for (const result of summary.results) {
+  console.log(result.slug, result.status, result.variants.map((v) => v.filename));
+}
+
+if (summary.failed.length > 0) {
+  console.error('Some images failed:', summary.failed);
+}
+```
+
+By default this emits `[600, 900, 1200, 1600, 2000]`-wide WebP variants (never upscaling past a
+source's own width) into `outputDir/<slug>/`, alongside a `.cache.json` sidecar per image. Rerunning
+the same call is cheap — a file whose content hash and resolved config haven't changed is skipped
+via the cache, not reprocessed.
+
+## Dispatch by filename tag
+
+Name a source file with an `__og` or `__ogonly` suffix to opt it into OGP-card generation, without
+changing any config:
+
+```
+source-photos/
+├── hero__og.jpg       → full variants + ogp.jpg
+├── banner__ogonly.jpg → ogp.jpg only, no width variants
+└── product.jpg        → full variants, no OGP
+```
+
+## Handle failures without aborting the batch
+
+`processImages` never throws for a single bad file — it collects failures into
+`summary.failed[]` and keeps going. Use `onError` (and `onMetadata`) to stream progress instead of
+inspecting the summary only at the end:
+
+```ts
+await processImages({
+  inputDir: './source-photos',
+  outputDir: './public/images',
+  onMetadata: async (record) => {
+    // e.g. write `record` into your own image database
+    console.log(`processed ${record.slug}: ${record.width}x${record.height}`);
+  },
+  onError: async (failure) => {
+    console.error(`${failure.inputPath} failed at ${failure.stage}: ${failure.error}`);
+  },
+});
+```
+
+See [Configuration](../guides/configuration.mdx) for the full config surface, the `photoVariantsPreset`
+shortcut, and how the content-hash cache invalidates.
