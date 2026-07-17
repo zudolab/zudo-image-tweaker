@@ -1,15 +1,38 @@
 ---
 title: Introduction
+description: What zudo-image-tweaker is and how its eleven subpath modules are organized.
 sidebar_position: 1
 ---
 
-## What is Doc?
+## What is zudo-image-tweaker?
 
-Doc is a documentation site built with [zudo-doc](https://github.com/zudolab/zudo-doc), a minimal documentation framework powered by zfb, MDX, and Tailwind CSS.
+`@takazudo/zudo-image-tweaker` is a [sharp](https://sharp.pixelplumbing.com/)-based image-tweaking
+toolkit, published as eleven focused subpath modules rather than one flat API. Each module is its
+own `exports` entry, so a consumer only pulls in the code paths — and the optional/native
+dependencies — that the modules they actually import need.
 
-## Key Features
+## The eleven modules
 
-- MDX authoring with rich component support
-- Fast static site generation via zfb
-- Tailwind CSS v4 for styling
-- Optional i18n, search, and more
+| Subpath | What it does |
+|---|---|
+| `/variants` | Multi-width WebP variant engine: content-hash cache, corruption repair, filename-tag dispatch. |
+| `/heif` | HEIC/HEIF → JPEG conversion with ICC profile preservation. |
+| `/ogp` | Social-card (Open Graph / Twitter card) image compositor. |
+| `/budget` | Byte-budget encode ladder — search for the highest quality that still fits a byte cap. |
+| `/square` | Five-mode square-crop toolbox. |
+| `/product-photo` | ML background removal plus procedural shadow synthesis for product photography. |
+| `/calibrate` | Background color normalization toward a target color. |
+| `/composite` | Overlay batch compositing. |
+| `/blurhash` | BlurHash placeholder generation. |
+| `/exif` | EXIF metadata extraction and orientation helpers. |
+| `/browser` | Client-side upload preparation pipeline. |
+
+Every module is reachable both as a dedicated subpath (`@takazudo/zudo-image-tweaker/variants`) and,
+for most exports, from the flat root import (`@takazudo/zudo-image-tweaker`) — see
+[Installation](./installation.mdx) for both forms.
+
+## Where to go next
+
+- [Installation](./installation.mdx) — add the package and handle the sharp build-script prompt.
+- [Quick Start](./quick-start.mdx) — process a directory of source photos into responsive variants.
+- [Configuration](../guides/configuration.mdx) — the full `/variants` engine config surface.

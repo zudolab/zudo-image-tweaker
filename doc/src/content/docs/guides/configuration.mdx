@@ -1,0 +1,107 @@
+---
+title: Configuration
+description: The /variants engine config surface, photoVariantsPreset, callback semantics, and caching.
+sidebar_position: 1
+---
+
+## Two entry points
+
+`/variants` exposes `processImages` (batch: scans `inputDir` and/or an explicit `files` list, with
+bounded concurrency) and `processOne` (single image, given an `ImageEntry`). `processImages`'s config
+is `processOne`'s config plus a few batch-only fields — both are documented together below.
+
+## Config surface
+
+Every field is optional except `outputDir`.
+
+| Field | Default | Notes |
+|---|---|---|
+| `outputDir` | — | Required. Root directory the per-image slug directories are created under. |
+| `widths` | `[600, 900, 1200, 1600, 2000]` | Responsive widths to emit. A source narrower than every configured width still gets one variant, at its own width. |
+| `formats` | `['webp']` | Output formats per width. |
+| `quality` | `85` | Encode quality (1–100) for variants and the OGP card. |
+| `outputName` | `` `${width}w.${format}` `` | Names each variant file. |
+| `ogpFileName` | `'ogp.jpg'` | OGP output filename within the slug directory. |
+| `ogpOptions` | `{}` | Extra options forwarded to `/ogp`'s `generateSmartOgp` — see that module's reference page. |
+| `cacheFileName` | `'.cache.json'` | Cache sidecar filename within the slug directory. |
+| `fallbackBlurhash` | none | blurhash to record when encoding fails. Omitted means a failed encode records `null`. |
+| `tagParser` | the `__og` / `__ogonly` parser | Filename-tag parser — see [Tag dispatch](#tag-dispatch-by-filename) below. |
+| `autoRepair` | `true` | Attempt corruption repair via `magick`/`ffmpeg` when available — see [External Binaries](./external-binaries.mdx). |
+| `bakeExifOrientation` | `false` | Bake EXIF orientation into pixels (and drop metadata) before encoding. |
+| `stripMetadata` | `false` | Strip all metadata before encoding. Routed through the same orientation-baking step as `bakeExifOrientation`, since stripping the EXIF tag alone would leave a sideways image once the variant pipeline auto-orients. |
+| `onMetadata` | none | Invoked (and awaited) with each produced or cache-hit `VariantMetadata` record. |
+| `onError` | none | Invoked (and awaited) once per failing file. The engine writes no report anywhere on its own. |
+
+Batch-only (`processImages` / `ProcessImagesConfig`), in addition to the above:
+
+| Field | Default | Notes |
+|---|---|---|
+| `inputDir` | none | Directory scanned for source images. Combinable with `files`. |
+| `files` | none | Explicit list of source file paths. |
+| `concurrency` | `4` | Max images processed at once. |
+| `cleanupOrphans` | `false` | Remove output slug directories that no longer correspond to any input. Opt-in, and only ever touches direct children of `outputDir`. |
+
+## Tag dispatch by filename
+
+The default `tagParser` reads a suffix on the source filename (before the extension) to choose a
+pipeline, then strips that suffix from the output slug:
+
+- `__ogonly` → OGP card only, no width variants.
+- `__og` → full width variants *plus* an OGP card.
+- anything else → full width variants, no OGP card.
+
+Pass your own `tagParser` to define a different vocabulary, or `noTagParser` (exported alongside
+`processImages`) to disable dispatch entirely — every file becomes a plain full-variant image keyed
+by its bare basename.
+
+## The photo preset
+
+`photoVariantsPreset` reproduces a smaller, EXIF-safe pipeline on top of the same engine: a
+`[400, 800, 1600]` width ladder, EXIF orientation baked into pixels with all metadata stripped, and
+tag dispatch disabled (`noTagParser`) so every file is a plain full-variant image. Spread it into a
+call and add the paths:
+
+```ts
+import { processImages, photoVariantsPreset } from '@takazudo/zudo-image-tweaker/variants';
+
+await processImages({
+  ...photoVariantsPreset,
+  inputDir: './source-photos',
+  outputDir: './public/images',
+});
+```
+
+## Callback semantics
+
+`onMetadata` and `onError` are each invoked — and awaited — once per image, as that image finishes:
+
+- `onMetadata(record)` fires for both a freshly processed image and a cache-hit skip (the cached
+  record is replayed). It never fires for an `ogonly`-mode image (its metadata is `null`) or for a
+  skipped non-image guard trip.
+- `onError(failure)` is a **`processImages`-only** callback — it's dispatched by the batch runner's
+  own wrapper around each `processOne` call, not by `processOne` itself. `processImages` never
+  throws for a single bad file: it catches whatever `processOne` throws, pushes the failure onto
+  `ProcessSummary.failed[]` (carrying the pipeline `stage` it surfaced from), invokes `onError`, and
+  keeps going. Calling `processOne` directly gets you none of this — a failure is a normal thrown
+  `VariantProcessingError` that your own code must catch; `onError` is never invoked.
+
+Two inputs that resolve to the same slug are rejected up front (each reported via `onError` with
+`stage: 'slug'`) rather than raced against the same output directory.
+
+## Caching
+
+Each processed image gets a `.cache.json` sidecar (configurable via `cacheFileName`) written
+atomically (staged to a sibling temp file, then renamed) inside its slug directory. A cache entry
+records:
+
+- the source file's content hash (64-bit xxhash of the raw bytes) — invalidates on any byte change
+  to the source, regardless of mtime;
+- a fingerprint of the output-affecting config (`quality`, `widths`, `formats`, `ogpFileName`,
+  `ogpOptions`, `fallbackBlurhash`, `bakeExifOrientation`, `stripMetadata`) — invalidates on a config
+  change even when the source bytes are unchanged;
+- whether the source was handled as an animated-GIF passthrough;
+- the last emitted `VariantMetadata` record, replayed on a cache hit so `onMetadata` still fires.
+
+A cache hit is only honored after confirming every expected output file still exists on disk — a
+`.cache.json` sidecar with missing/deleted output files forces reprocessing rather than silently
+skipping.

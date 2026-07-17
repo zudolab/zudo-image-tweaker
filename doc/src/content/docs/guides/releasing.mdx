@@ -1,0 +1,49 @@
+---
+title: Releasing
+description: npm dist-tag channels, the pre-1.0 versioning scheme, and where the release runbook lives.
+sidebar_position: 4
+---
+
+This page is for anyone versioning or releasing `@takazudo/zudo-image-tweaker` itself — not required
+reading to consume the package.
+
+## Version channels
+
+Two npm dist-tags are in play, both derived automatically from the pushed tag's version string —
+there is nothing to configure by hand:
+
+- **`latest`** — the default a bare `pnpm add @takazudo/zudo-image-tweaker` resolves to. Every clean
+  `v*` tag (no prerelease suffix) publishes here.
+- **`next`** — an opt-in prerelease side channel. A tag matching `-next.*`, `-beta.*`, or `-rc.*`
+  publishes here instead. Consumers opt in explicitly:
+
+  ```sh
+  pnpm add @takazudo/zudo-image-tweaker@next
+  ```
+
+## The pre-1.0 versioning rule
+
+While the package is `0.x`, the everyday mainline ships clean `0.MINOR.PATCH` versions straight to
+`latest` — **never** a `-next` mainline:
+
+- A breaking change is a **minor** bump (`0.2.0` → `0.3.0`). On `0.x`, the major-zero is itself
+  SemVer's "anything may change" signal, so breaking changes don't need a major bump.
+- Everything else is a **patch** bump (`0.2.0` → `0.2.1`).
+- A `-next` prerelease is an **opt-in side channel only**, reserved for previewing a specific
+  upcoming version ahead of `latest` — never the mainline, and never mirrored onto `latest` (both
+  would strand a tagless install on a stale version).
+
+The reasoning: a tagless `pnpm add` is a direct `latest`-pointer dereference, so the only way it
+always resolves the newest build is keeping `latest` on the newest clean release.
+
+## Release runbook
+
+Releases are cut with the repo-local `/l-make-release` skill
+([`.claude/skills/l-make-release/SKILL.md`](https://github.com/zudolab/zudo-image-tweaker/blob/main/.claude/skills/l-make-release/SKILL.md)),
+which bumps the version, prepends a changelog section, waits for CI, validates the package
+(`publint` + `scripts/check-pack.sh`), pushes the `v*` tag, and creates the GitHub Release. The
+version source-of-truth is `packages/zit/package.json`; the actual `npm publish --provenance` runs
+from `.github/workflows/release.yml`, triggered by the tag push — there is no manual `npm publish`
+step. See the root
+[README's Release section](https://github.com/zudolab/zudo-image-tweaker#release) for the full
+picture, including the first-release preflight and `NPM_TOKEN` rotation notes.
