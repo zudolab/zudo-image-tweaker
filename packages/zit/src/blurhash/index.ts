@@ -73,6 +73,8 @@ export async function blurhashToDataUri(
 export interface BatchBlurhashToDataUriOptions {
   /** Number of hashes decoded concurrently per batch. */
   chunkSize?: number;
+  /** Output width and height, in pixels, of each decoded PNG. */
+  size?: number;
 }
 
 /**
@@ -84,7 +86,7 @@ export async function batchBlurhashToDataUri(
   hashes: string[],
   options: BatchBlurhashToDataUriOptions = {},
 ): Promise<string[]> {
-  const { chunkSize = 20 } = options;
+  const { chunkSize = 20, size } = options;
   if (!Number.isInteger(chunkSize) || chunkSize < 1) {
     throw new Error(`batchBlurhashToDataUri: chunkSize must be a positive integer, got ${chunkSize}`);
   }
@@ -92,7 +94,7 @@ export async function batchBlurhashToDataUri(
   const results: string[] = [];
   for (let i = 0; i < hashes.length; i += chunkSize) {
     const chunk = hashes.slice(i, i + chunkSize);
-    const decoded = await Promise.all(chunk.map((hash) => blurhashToDataUri(hash)));
+    const decoded = await Promise.all(chunk.map((hash) => blurhashToDataUri(hash, { size })));
     results.push(...decoded);
   }
   return results;
