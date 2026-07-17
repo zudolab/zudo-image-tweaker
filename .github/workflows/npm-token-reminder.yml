@@ -1,0 +1,102 @@
+# npm-token-reminder.yml
+#
+# npm granular access tokens (release.yml's NPM_TOKEN) are capped at a
+# 90-day expiration by npm — see release.yml's header comment. A silently
+# expired token turns the next release into a broken `npm publish` at the
+# worst possible time (mid-release, irreversible steps already run). A
+# doc comment alone is not enough to guarantee rotation actually happens
+# (issue #58), so this workflow tracks the token's age against a rotation
+# date and opens a reminder issue before the cap is hit.
+#
+# There is no repo variable involved — NPM_TOKEN_ROTATED_ON below is the
+# single source of truth. Whoever rotates the token must update this date
+# in the same change (see the reminder issue body for the exact steps).
+#
+# One-tracking-issue pattern, same as registry-drift.yml: on trigger, open
+# (or comment on) a single issue found by exact title match; once the
+# rotation date has been updated, the next scheduled run closes it.
+
+name: NPM Token Rotation Reminder
+
+on:
+  schedule:
+    # Monthly, off the top of the hour to avoid the scheduler pile-up at :00.
+    - cron: "23 6 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-token-rotation-reminder
+  cancel-in-progress: false
+
+env:
+  # Update this every time NPM_TOKEN is rotated. This is the only place
+  # the rotation date is tracked — there is no repo variable to keep in
+  # sync with it.
+  NPM_TOKEN_ROTATED_ON: "2026-07-17"
+  # Remind this many days before npm's 90-day expiration cap.
+  REMIND_AFTER_DAYS: "75"
+  TRACKING_ISSUE_TITLE: "npm token nearing expiry — rotate NPM_TOKEN"
+
+jobs:
+  check-token-age:
+    name: Check NPM_TOKEN age
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Compute token age
+        id: age
+        shell: bash
+        run: |
+          ROTATED_EPOCH=$(date -d "$NPM_TOKEN_ROTATED_ON" +%s)
+          NOW_EPOCH=$(date +%s)
+          AGE_DAYS=$(( (NOW_EPOCH - ROTATED_EPOCH) / 86400 ))
+          echo "Token last rotated on $NPM_TOKEN_ROTATED_ON, age is $AGE_DAYS day(s)."
+          if [ "$AGE_DAYS" -ge "$REMIND_AFTER_DAYS" ]; then
+            echo "should_remind=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_remind=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "age_days=$AGE_DAYS" >> "$GITHUB_OUTPUT"
+
+      - name: Find existing tracking issue
+        id: find-issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NUMBER=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+            --json number,title \
+            --jq --arg t "$TRACKING_ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -n1)
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update reminder issue
+        if: steps.age.outputs.should_remind == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.find-issue.outputs.number }}
+          AGE_DAYS: ${{ steps.age.outputs.age_days }}
+        run: |
+          BODY="NPM_TOKEN was last rotated on $NPM_TOKEN_ROTATED_ON and is now $AGE_DAYS day(s) old. npm granular access tokens expire at 90 days, so this token needs rotating soon (or has already expired).
+
+          Rotate it at https://www.npmjs.com/settings/<user>/tokens/granular-access-tokens/new — see \`.github/workflows/release.yml\`'s header comment for the required scope and the \"Bypass 2FA for noninteractive automation\" flag. Update the \`NPM_TOKEN\` repo secret, then set \`NPM_TOKEN_ROTATED_ON\` in \`.github/workflows/npm-token-reminder.yml\` to today's date and merge.
+
+          This issue is auto-managed by \`.github/workflows/npm-token-reminder.yml\` — it closes automatically once the rotation date is updated and the next scheduled run sees a fresh token."
+          if [ -n "$ISSUE_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TRACKING_ISSUE_TITLE" --body "$BODY"
+          fi
+
+      - name: Close reminder issue once rotated
+        if: steps.age.outputs.should_remind == 'false' && steps.find-issue.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.find-issue.outputs.number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "NPM_TOKEN_ROTATED_ON was updated — token is fresh again. Closing."
+          gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY"
