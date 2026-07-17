@@ -724,4 +724,45 @@ describe('trimPadSquare', () => {
     expect(border.a).toBeGreaterThan(100);
     expect(border.a).toBeLessThan(150);
   });
+
+  it('transparent-background content trims to the opaque bounding box, not the whole canvas (issue #77)', async () => {
+    // 300x300 fully transparent canvas with an opaque 100x100 black rect
+    // centered on it. The transparent surround holds black RGB (0,0,0) —
+    // if alpha isn't considered, contentBBox sees "not near-white" pixels
+    // everywhere and treats the entire canvas as content (no trim at all).
+    // With alpha considered, the transparent surround must read as background.
+    const canvas = 300;
+    const rectSize = 100;
+    const channels = 4;
+    const raw = Buffer.alloc(canvas * canvas * channels, 0); // all-zero: transparent black everywhere
+    const rectOffset = (canvas - rectSize) / 2;
+    for (let y = rectOffset; y < rectOffset + rectSize; y++) {
+      for (let x = rectOffset; x < rectOffset + rectSize; x++) {
+        const i = (y * canvas + x) * channels;
+        raw[i] = 10;
+        raw[i + 1] = 10;
+        raw[i + 2] = 10;
+        raw[i + 3] = 255; // fully opaque
+      }
+    }
+    const src = await sharp(raw, { raw: { width: canvas, height: canvas, channels } })
+      .png()
+      .toBuffer();
+
+    const result = await trimPadSquare(src, { margin: 0.1 });
+
+    // longSide = 100 (the opaque rect) → side = round(100 / 0.8) = 125.
+    // The old (buggy) behavior would trim nothing and yield a 300x300 output.
+    expect(result).toMatchObject({ width: 125, height: 125 });
+    expect(await dims(result.buffer)).toEqual({ width: 125, height: 125 });
+
+    // Corners are the default white pad background, not leftover transparent/black.
+    const corner = await pixelWithAlpha(result.buffer, 3, 3);
+    expect(corner).toMatchObject({ r: 255, g: 255, b: 255 });
+
+    // Center is the trimmed opaque content.
+    const centre = await pixelWithAlpha(result.buffer, 62, 62);
+    expect(centre.r).toBeLessThan(50);
+    expect(centre.a).toBeGreaterThan(200);
+  });
 });

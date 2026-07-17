@@ -7,9 +7,19 @@ export type ImageInput = SharpInput;
 export type CompositePosition = 'bottom-right';
 
 export interface CompositeOverlayOptions {
-  /** Overlay width as a percentage (0-100) of the base image's width. The overlay is always forced to a 1:1 square at this size. */
+  /**
+   * Overlay width as a percentage (0-100) of the base image's SHORTER side
+   * (min(width, height)). The overlay is always forced to a 1:1 square at
+   * this size. Sizing off the shorter side (rather than width alone) keeps
+   * the badge from overflowing the base on its narrow axis for landscape
+   * (or portrait) images.
+   */
   widthPercent: number;
-  /** Gap from the base image's edges, as a percentage of the base image's *width* (used for both the horizontal and vertical offset). */
+  /**
+   * Gap from the base image's edges, as a percentage of the base image's
+   * SHORTER side (used for both the horizontal and vertical offset) — same
+   * basis as `widthPercent`, for the same reason.
+   */
   paddingPercent: number;
   /** @default 'bottom-right' */
   position?: CompositePosition;
@@ -45,14 +55,23 @@ export async function compositeOverlay(
     throw new Error('compositeOverlay: could not read base image dimensions');
   }
 
-  const overlaySizePx = Math.round(baseWidth * (widthPercent / 100));
+  // Size and pad off the shorter side, not baseWidth alone — a landscape (or
+  // portrait) base otherwise gets an overlay budget that ignores its narrow
+  // axis entirely, producing a badge that doesn't fit vertically/horizontally.
+  const minSide = Math.min(baseWidth, baseHeight);
+  const overlaySizePx = Math.round(minSide * (widthPercent / 100));
   if (!Number.isFinite(overlaySizePx) || overlaySizePx <= 0) {
     throw new Error(
-      `compositeOverlay: widthPercent ${widthPercent} of base width ${baseWidth}px rounds to a non-positive overlay size`,
+      `compositeOverlay: widthPercent ${widthPercent} of base shorter side ${minSide}px rounds to a non-positive overlay size`,
     );
   }
-  const paddingPx = Math.round(baseWidth * (paddingPercent / 100));
+  const paddingPx = Math.round(minSide * (paddingPercent / 100));
   const { left, top } = resolveOffsets(position, baseWidth, baseHeight, overlaySizePx, paddingPx);
+  if (left < 0 || top < 0) {
+    throw new Error(
+      `compositeOverlay: overlay (${overlaySizePx}px) plus padding (${paddingPx}px) does not fit within the ${baseWidth}x${baseHeight} base image at position "${position}" — reduce widthPercent/paddingPercent`,
+    );
+  }
 
   const resizedOverlay = await sharp(overlay)
     .rotate()
