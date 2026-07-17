@@ -77,6 +77,28 @@ async function makeNoiseImage(width: number, height: number, seed = 42) {
   return sharp(data, { raw: { width, height, channels } }).png().toBuffer();
 }
 
+/**
+ * A photo-like fixture: smooth gradients with mild seeded noise. Gradients
+ * (unlike pure noise) let palette quantization resolve different quality
+ * targets to different palettes, so each PNG ladder rung encodes distinctly.
+ */
+async function makePhotoLikeImage(width: number, height: number, seed = 11) {
+  const channels = 3;
+  const data = Buffer.alloc(width * height * channels);
+  const random = mulberry32(seed);
+  const clamp = (value: number) => Math.min(255, Math.max(0, value));
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * channels;
+      const noise = () => (random() - 0.5) * 24;
+      data[i] = clamp(Math.round((x / width) * 255 + noise()));
+      data[i + 1] = clamp(Math.round((y / height) * 255 + noise()));
+      data[i + 2] = clamp(Math.round(((x + y) / (width + height)) * 255 + noise()));
+    }
+  }
+  return sharp(data, { raw: { width, height, channels } }).png().toBuffer();
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -236,6 +258,32 @@ describe('encodeUnderByteBudget — step-down preset budget loop', () => {
       // No buffer is carried on failure — steps still record every attempt made.
       expect(result.steps.length).toBeGreaterThan(1);
       expect(result.steps.at(-1)?.width).toBeLessThan(500);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'makes every default PNG ladder rung effective — no two adjacent rungs byte-identical',
+    async () => {
+      const src = await makePhotoLikeImage(300, 300);
+
+      // minWidth pinned to the source width prevents width step-down, and
+      // maxBytes 1 forces the loop through the whole quality ladder.
+      const result = await encodeUnderByteBudget(src, {
+        maxBytes: 1,
+        format: 'png',
+        minWidth: 300,
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('expected failure result');
+      // Three effective encodings on this stack: lossless, palette-256,
+      // palette-16 — rungs resolving to a duplicate encoding are skipped.
+      expect(result.steps).toHaveLength(3);
+      expect(result.steps.every((step) => step.width === 300)).toBe(true);
+      for (let i = 1; i < result.steps.length; i++) {
+        expect(result.steps[i]!.bytes).not.toBe(result.steps[i - 1]!.bytes);
+      }
     },
     TEST_TIMEOUT,
   );

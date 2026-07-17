@@ -7,9 +7,10 @@
  *
  * - **Exact-width preset** (`exactWidth` set): the output width is fixed —
  *   smaller sources are upscaled to it, larger ones downscaled — and only
- *   PNG compression quality steps down across a small ladder of rungs
- *   (palette quantization kicks in at the lower rungs). Useful when a
- *   downstream consumer requires an exact pixel width regardless of size.
+ *   compression quality steps down across a small ladder of rungs matched
+ *   to the output format (for PNG, palette quantization engages below the
+ *   near-lossless top rung). Useful when a downstream consumer requires an
+ *   exact pixel width regardless of size.
  * - **Step-down preset** (`exactWidth` omitted): the source's aspect ratio
  *   is kept, output format auto-detects JPEG vs PNG from the alpha
  *   channel, and once the quality ladder at the current width is
@@ -25,6 +26,11 @@
 import fs from 'node:fs/promises';
 import sharp from 'sharp';
 import type { PngOptions } from 'sharp';
+
+interface LoadInputOptions {
+  fetchTimeoutMs: number;
+  maxInputBytes: number;
+}
 
 export interface Step {
   width: number;
@@ -67,15 +73,25 @@ export interface EncodeUnderByteBudgetOptions {
   widthStepFactor?: number;
   /** Whether the lower quality rungs may engage palette quantization for PNG output. Defaults to true. */
   paletteQuantization?: boolean;
+  /** Remote-URL inputs only: milliseconds before the fetch is aborted. Defaults to 30000. */
+  fetchTimeoutMs?: number;
+  /** Remote-URL inputs only: byte cap on the downloaded input. Defaults to 100MB. */
+  maxInputBytes?: number;
 }
 
 const DEFAULT_MIN_WIDTH = 400;
 const DEFAULT_WIDTH_STEP_FACTOR = 0.85;
+const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_INPUT_BYTES = 100 * 1024 * 1024;
 
 const JPEG_QUALITY_LADDER = [90, 82, 75, 65, 55, 45, 35];
+// sharp only honors PNG `quality` when palette quantization is engaged
+// (libimagequant); with `palette: false` it is silently ignored, which made
+// non-palette rungs byte-identical no-ops (issue #26). Rungs at or above
+// this threshold are the near-lossless attempt (no palette, no quality);
+// every rung below quantizes, so its quality value actually takes effect.
+const PNG_NEAR_LOSSLESS_QUALITY = 95;
 const EXACT_WIDTH_PNG_QUALITY_LADDER = [95, 85, 75, 65, 50];
-// 100 is a sentinel for the highest-fidelity rung: no explicit sharp
-// `quality` option is set, so PNG encoding stays near-lossless.
 const STEP_DOWN_PNG_QUALITY_LADDER = [100, 90, 80, 65, 50];
 
 /**
@@ -96,9 +112,11 @@ export async function encodeUnderByteBudget(
     minWidth = DEFAULT_MIN_WIDTH,
     widthStepFactor = DEFAULT_WIDTH_STEP_FACTOR,
     paletteQuantization = true,
+    fetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
+    maxInputBytes = DEFAULT_MAX_INPUT_BYTES,
   } = options;
 
-  const inputBuffer = await loadInput(input);
+  const inputBuffer = await loadInput(input, { fetchTimeoutMs, maxInputBytes });
   const metadata = await sharp(inputBuffer).metadata();
 
   if (isAnimatedGif(metadata.format, metadata.pages)) {
@@ -116,7 +134,7 @@ export async function encodeUnderByteBudget(
       format,
       exactWidth,
       maxBytes,
-      qualityLadder: qualityLadder ?? EXACT_WIDTH_PNG_QUALITY_LADDER,
+      qualityLadder: qualityLadder ?? (format === 'jpeg' ? JPEG_QUALITY_LADDER : EXACT_WIDTH_PNG_QUALITY_LADDER),
       paletteQuantization,
     });
   }
@@ -155,8 +173,15 @@ async function encodeExactWidth(
 ): Promise<BudgetResult> {
   const { format, exactWidth, maxBytes, qualityLadder, paletteQuantization } = opts;
   const steps: Step[] = [];
+  const attempted = new Set<string>();
 
   for (const quality of qualityLadder) {
+    const signature = encoderSignature(format, quality, paletteQuantization);
+    if (attempted.has(signature)) {
+      continue; // this rung resolves to encoder options already tried — a no-op attempt
+    }
+    attempted.add(signature);
+
     const buffer = await encodeAtExactWidth(inputBuffer, format, exactWidth, quality, paletteQuantization);
     steps.push({ width: exactWidth, quality, bytes: buffer.length });
 
@@ -180,21 +205,9 @@ async function encodeAtExactWidth(
     .resize(width, null, { withoutEnlargement: false }); // allow upscaling to the exact width
 
   if (format === 'png') {
-    return pipeline.png(exactWidthPngOptions(quality, paletteQuantization)).toBuffer();
+    return pipeline.png(pngOptions(quality, paletteQuantization)).toBuffer();
   }
   return pipeline.jpeg({ quality, mozjpeg: true }).toBuffer();
-}
-
-function exactWidthPngOptions(quality: number, paletteQuantization: boolean): PngOptions {
-  const opts: PngOptions = { compressionLevel: 9, effort: 10, quality };
-  if (paletteQuantization && quality <= 65) {
-    opts.palette = true;
-    opts.colors = quality <= 50 ? 128 : 256;
-    opts.dither = 1.0;
-  } else {
-    opts.palette = false;
-  }
-  return opts;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +232,15 @@ async function encodeWithWidthStepDown(
   let width = sourceWidth;
 
   while (true) {
+    const attempted = new Set<string>();
+
     for (const quality of qualityLadder) {
+      const signature = encoderSignature(format, quality, paletteQuantization);
+      if (attempted.has(signature)) {
+        continue; // this rung resolves to encoder options already tried at this width — a no-op attempt
+      }
+      attempted.add(signature);
+
       // Keep the original size on the very first attempt; resize down once
       // a step-down has actually happened.
       const targetWidth = width === sourceWidth ? null : width;
@@ -261,23 +282,40 @@ async function encodeAtWidth(
   }
 
   if (format === 'png') {
-    return pipeline.png(stepDownPngOptions(quality, paletteQuantization)).toBuffer();
+    return pipeline.png(pngOptions(quality, paletteQuantization)).toBuffer();
   }
   return pipeline.jpeg({ quality, mozjpeg: true }).toBuffer();
 }
 
-function stepDownPngOptions(quality: number, paletteQuantization: boolean): PngOptions {
+function pngOptions(quality: number, paletteQuantization: boolean): PngOptions {
   const opts: PngOptions = { compressionLevel: 9, effort: 10 };
-  if (quality < 100) {
-    opts.quality = quality;
-  }
-  if (paletteQuantization && quality <= 80) {
+  if (paletteQuantization && quality < PNG_NEAR_LOSSLESS_QUALITY) {
     opts.palette = true;
-    opts.colors = quality <= 50 ? 128 : 256;
+    // On the pinned sharp/libvips stack (sharp 0.35.3, vips 8.18.3,
+    // imagequant shim 2.4.1) the palette `quality` option is inert, and the
+    // colour cap is bucketed by PNG bitdepth — the only effective palette
+    // sizes are 256, 16, 4, and 2 (verified empirically). The colour cap is
+    // therefore the rung's real lever, mapped from its nominal quality;
+    // `quality` is deliberately not passed so rungs resolving to the same
+    // colour bucket dedupe as no-op attempts instead of re-encoding.
+    opts.colors = quality >= 70 ? 256 : quality >= 45 ? 16 : 4;
+    opts.dither = 1.0;
   } else {
     opts.palette = false;
   }
   return opts;
+}
+
+/**
+ * Canonical fingerprint of the encoder options a rung resolves to, used to
+ * skip rungs that cannot change the output (e.g. every non-palette PNG rung
+ * encodes identically, since sharp ignores `quality` without a palette).
+ */
+function encoderSignature(format: 'jpeg' | 'png', quality: number, paletteQuantization: boolean): string {
+  if (format === 'png') {
+    return JSON.stringify(pngOptions(quality, paletteQuantization));
+  }
+  return JSON.stringify({ quality });
 }
 
 // ---------------------------------------------------------------------------
@@ -316,28 +354,86 @@ function isRemoteUrl(src: string): boolean {
   return /^https?:\/\//i.test(src);
 }
 
-async function loadInput(input: Buffer | string): Promise<Buffer> {
+async function loadInput(input: Buffer | string, options: LoadInputOptions): Promise<Buffer> {
   if (Buffer.isBuffer(input)) {
     return input;
   }
 
   if (isRemoteUrl(input)) {
-    let response: Response;
-    try {
-      response = await fetch(input);
-    } catch (error) {
-      throw new Error(`Failed to fetch "${input}": ${(error as Error).message}`, { cause: error });
-    }
-    if (!response.ok) {
-      throw new Error(`Failed to fetch "${input}": HTTP ${response.status} ${response.statusText}`);
-    }
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    return loadRemote(input, options);
   }
 
   try {
     return await fs.readFile(input);
   } catch (error) {
     throw new Error(`Failed to read local file "${input}": ${(error as Error).message}`, { cause: error });
+  }
+}
+
+/**
+ * Fetch a remote input with a wall-clock timeout and a downloaded-bytes cap
+ * (issue #62) — remote URLs may be user-influenced, so an unbounded fetch is
+ * a memory/hang DoS vector. Node built-ins only: AbortController covers both
+ * the headers and the body download, and the body is streamed chunk by chunk
+ * so an over-cap response is aborted without ever being fully buffered.
+ */
+async function loadRemote(url: string, { fetchTimeoutMs, maxInputBytes }: LoadInputOptions): Promise<Buffer> {
+  const controller = new AbortController();
+  const timeoutError = new Error(`Failed to fetch "${url}": timed out after ${fetchTimeoutMs}ms`);
+  const timer = setTimeout(() => controller.abort(timeoutError), fetchTimeoutMs);
+
+  const rethrowMapped = (error: unknown): never => {
+    if (controller.signal.reason === timeoutError) {
+      throw timeoutError;
+    }
+    if (error instanceof Error && error.message.includes('exceeds the maximum input size')) {
+      throw error;
+    }
+    throw new Error(`Failed to fetch "${url}": ${(error as Error).message}`, { cause: error });
+  };
+
+  try {
+    let response: Response;
+    try {
+      response = await fetch(url, { signal: controller.signal });
+    } catch (error) {
+      rethrowMapped(error);
+      throw error; // unreachable — rethrowMapped always throws
+    }
+    if (!response.ok) {
+      throw new Error(`Failed to fetch "${url}": HTTP ${response.status} ${response.statusText}`);
+    }
+
+    const declaredLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > maxInputBytes) {
+      controller.abort();
+      throw new Error(
+        `Remote input "${url}" declares ${declaredLength} bytes, which exceeds the maximum input size of ${maxInputBytes} bytes`,
+      );
+    }
+
+    if (!response.body) {
+      return Buffer.alloc(0);
+    }
+
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+        totalBytes += chunk.byteLength;
+        if (totalBytes > maxInputBytes) {
+          controller.abort();
+          throw new Error(
+            `Remote input "${url}" exceeds the maximum input size of ${maxInputBytes} bytes (aborted after ${totalBytes} bytes)`,
+          );
+        }
+        chunks.push(chunk);
+      }
+    } catch (error) {
+      rethrowMapped(error);
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    clearTimeout(timer);
   }
 }

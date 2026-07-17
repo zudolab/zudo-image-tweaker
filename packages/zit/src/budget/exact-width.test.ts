@@ -42,6 +42,30 @@ async function makeNoiseImage(width: number, height: number, seed = 7) {
 }
 
 /**
+ * A photo-like fixture: smooth per-channel gradients with mild seeded noise.
+ * Unlike pure noise (where palette quantization maxes out its colour budget
+ * at every quality target), gradients let libimagequant hit different
+ * quality targets with different palettes, so each ladder rung produces a
+ * distinct encoding — which is what the rung-effectiveness tests assert.
+ */
+async function makePhotoLikeImage(width: number, height: number, seed = 11) {
+  const channels = 3;
+  const data = Buffer.alloc(width * height * channels);
+  const random = mulberry32(seed);
+  const clamp = (value: number) => Math.min(255, Math.max(0, value));
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * channels;
+      const noise = () => (random() - 0.5) * 24;
+      data[i] = clamp(Math.round((x / width) * 255 + noise()));
+      data[i + 1] = clamp(Math.round((y / height) * 255 + noise()));
+      data[i + 2] = clamp(Math.round(((x + y) / (width + height)) * 255 + noise()));
+    }
+  }
+  return sharp(data, { raw: { width, height, channels } }).png().toBuffer();
+}
+
+/**
  * A minimal animated (multi-page) GIF: two solid-color frames stacked into
  * one tall canvas and encoded with sharp's animated-GIF join support.
  */
@@ -152,7 +176,10 @@ describe('encodeUnderByteBudget — exact-width preset', () => {
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error('expected failure result');
       expect(result.reason).toBe('unreachable-budget');
-      expect(result.steps).toHaveLength(5); // all five default rungs attempted
+      // The five nominal default rungs resolve to three distinct encodings
+      // (lossless, palette-256, palette-16) — duplicates are skipped rather
+      // than re-encoded (issue #26).
+      expect(result.steps).toHaveLength(3);
       expect(result.steps.every((step) => step.width === 300)).toBe(true);
     },
     TEST_TIMEOUT,
@@ -184,6 +211,60 @@ describe('encodeUnderByteBudget — exact-width preset', () => {
       if (!withoutPalette.ok) throw new Error('expected ok result');
       const withoutPaletteMeta = await sharp(withoutPalette.buffer).metadata();
       expect(withoutPaletteMeta.isPalette).toBe(false);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'makes every default PNG ladder rung effective — no two adjacent rungs byte-identical',
+    async () => {
+      const src = await makePhotoLikeImage(300, 300);
+
+      // maxBytes 1 forces the loop through the entire ladder.
+      const result = await encodeUnderByteBudget(src, { exactWidth: 300, maxBytes: 1 });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('expected failure result');
+      // Three effective encodings on this stack: lossless, palette-256,
+      // palette-16 — rungs resolving to a duplicate encoding are skipped.
+      expect(result.steps).toHaveLength(3);
+      for (let i = 1; i < result.steps.length; i++) {
+        expect(result.steps[i]!.bytes).not.toBe(result.steps[i - 1]!.bytes);
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'skips no-op rungs instead of re-encoding identical output when palette quantization is disabled',
+    async () => {
+      const src = await makePhotoLikeImage(120, 120);
+
+      // With paletteQuantization off, every PNG rung resolves to the same
+      // lossless encoder options — only one attempt should be made.
+      const result = await encodeUnderByteBudget(src, {
+        exactWidth: 120,
+        maxBytes: 1,
+        paletteQuantization: false,
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('expected failure result');
+      expect(result.steps).toHaveLength(1);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'uses the JPEG quality ladder when the exact-width output format is jpeg',
+    async () => {
+      const src = await makePhotoLikeImage(200, 200);
+
+      const result = await encodeUnderByteBudget(src, { exactWidth: 200, format: 'jpeg', maxBytes: 1 });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('expected failure result');
+      expect(result.steps.map((step) => step.quality)).toEqual([90, 82, 75, 65, 55, 45, 35]);
     },
     TEST_TIMEOUT,
   );
