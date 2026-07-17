@@ -10,7 +10,7 @@ pnpm install          # install all workspace dependencies
 pnpm build             # build all packages (pnpm -r --if-present build)
 pnpm test              # run all tests (pnpm -r --if-present test)
 pnpm typecheck          # type-check all packages
-pnpm b4push             # run build + test + typecheck, mirrors ci.yml
+pnpm b4push             # run build + test + typecheck + check-pack, mirrors ci.yml
 ```
 
 Scope any command to the package with `pnpm -F @takazudo/zudo-image-tweaker <script>`.
