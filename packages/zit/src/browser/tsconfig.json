@@ -1,0 +1,13 @@
+// Companion to ../../tsconfig.server.json (issue #68) — the browser subtree
+// checked on its own with DOM lib present, proving the split is symmetric:
+// server code fails without DOM, browser code succeeds with it. See
+// tsconfig.server.json's header comment for why this isn't wired into the
+// frozen "typecheck"/"build" npm scripts.
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "noEmit": true
+  },
+  "include": ["**/*"]
+}
