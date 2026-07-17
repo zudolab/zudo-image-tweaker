@@ -1,0 +1,103 @@
+# main-deploy.yml
+#
+# Production deploy of the doc/ site to Cloudflare Workers Static Assets
+# (NOT Pages — the house pattern migrated). Triggered on every push to
+# `main`. Build and deploy run in a single job (no other job consumes the
+# build output, so there is nothing to share across jobs).
+#
+# doc/ is a standalone project outside the root pnpm workspace (see root
+# CLAUDE.md) with its own lockfile, so every step here is `-C doc` /
+# working-directory: doc scoped — this workflow does not touch the root
+# workspace at all.
+#
+# ── Preflight facts (recorded at planning time, issue #15) ─────────────────
+# - Zone takazudomodular.com is active on the same Cloudflare account as
+#   CLOUDFLARE_ACCOUNT_ID below.
+# - Hostname zudo-image-tweaker.takazudomodular.com had NO existing DNS
+#   records (NXDOMAIN) at planning time — the custom_domain = true
+#   provisioning precondition (doc/wrangler.toml) is satisfied.
+# - Residual risk: if CLOUDFLARE_API_TOKEN is scoped to specific existing
+#   workers, the FIRST deploy of this new worker fails with an auth error.
+#   Remediation: widen the token to account-level "Workers: Edit" (NOT
+#   "Pages: Edit" — Pages and Workers Static Assets are different products
+#   with different token scopes) and re-run this workflow.
+#
+# Action SHAs are pinned to immutable commits (OpenSSF best practice) using
+# the same pins as ci.yml / release.yml; the trailing comment names the
+# release for human readability. `cache: pnpm` is deliberately NOT used on
+# actions/setup-node — a fresh install from the npm CDN outperforms cache
+# restore for a store this size.
+
+name: Production Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and deploy doc site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm -C doc install --frozen-lockfile
+
+      - name: Build doc site
+        run: pnpm -C doc build
+
+      - name: Deploy to Cloudflare Workers (production)
+        working-directory: doc
+        # Pinned to the package.json devDependency version so production
+        # deploys use the wrangler the local dry-run (issue #15) validated.
+        # No .assetsignore step: `pnpm build` here produces no dist/_worker.js
+        # (pure static build, no adapter), so doc/wrangler.toml uses the
+        # pure-assets config branch — there is no worker script file to hide
+        # from the asset directory. See doc/wrangler.toml's header comment.
+        run: |
+          WRANGLER_VERSION=$(node -p "require('./package.json').devDependencies.wrangler")
+          npx "wrangler@${WRANGLER_VERSION}" deploy
+        env:
+          # Workers: Edit scope required (NOT Pages: Edit) — see the
+          # residual-risk note above.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Smoke test (HTTPS)
+        # Retries for ~2 minutes: a first-ever deploy to a fresh custom
+        # domain needs time for DNS + TLS cert provisioning before the
+        # route actually resolves, even though the deploy step above
+        # already reported success.
+        run: |
+          URL="https://zudo-image-tweaker.takazudomodular.com/"
+          for i in $(seq 1 24); do
+            STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$URL" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Smoke test passed: $URL returned 200 (attempt $i/24)"
+              exit 0
+            fi
+            echo "Attempt $i/24: $URL returned HTTP $STATUS, retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::Smoke test failed: $URL did not return 200 within ~2 minutes"
+          exit 1
