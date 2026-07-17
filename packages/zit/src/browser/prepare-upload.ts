@@ -56,10 +56,13 @@ export const MISSING_HEIC2ANY_MESSAGE = 'Install heic2any to decode HEIC in the 
 
 /**
  * Thrown when the pipeline needs to read EXIF (always) but the optional `exifr`
- * peer dependency is not installed. Exported so callers/tests can assert
- * against the wording without duplicating it.
+ * peer dependency is not installed. `exifr` is required for every image — the
+ * capture date is read even for plain JPEGs that need no orientation bake — so
+ * the message names EXIF reading, not just baking. Exported so callers/tests
+ * can assert against the wording without duplicating it.
  */
-export const MISSING_EXIFR_MESSAGE = 'Install exifr to enable orientation baking';
+export const MISSING_EXIFR_MESSAGE =
+  'Install exifr to enable EXIF reading (capture date + orientation baking)';
 
 /**
  * Marks an error as "a required optional peer dependency is missing" so the
