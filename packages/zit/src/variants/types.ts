@@ -94,8 +94,13 @@ export interface ItemResult {
 export interface ProcessFailure {
   inputPath: string;
   slug: string;
-  /** Coarse pipeline stage the failure surfaced from, for triage. */
-  stage: 'slug' | 'heic' | 'probe' | 'variants' | 'ogp' | 'passthrough' | 'cache' | 'unknown';
+  /**
+   * Coarse pipeline stage the failure surfaced from, for triage. 'io' is
+   * pre-pipeline filesystem access (hashing the source, creating the output
+   * directory); 'unknown' is reserved for genuinely untagged errors (e.g. a
+   * throw from user-supplied callback code), not engine stages.
+   */
+  stage: 'slug' | 'io' | 'heic' | 'probe' | 'variants' | 'ogp' | 'passthrough' | 'cache' | 'unknown';
   error: string;
 }
 
