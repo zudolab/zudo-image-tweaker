@@ -125,6 +125,7 @@ export async function convertHeifToJpeg(
 ): Promise<ConvertHeifResult> {
   const quality = opts.quality ?? DEFAULT_QUALITY;
   const maxInputBytes = opts.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES;
+  const maxDecodePixels = opts.maxDecodePixels ?? DEFAULT_MAX_DECODE_PIXELS;
   await assertWithinSizeBound(input, maxInputBytes);
 
   let sipsError: Error | null = null;
@@ -135,7 +136,7 @@ export async function convertHeifToJpeg(
   }
 
   try {
-    return await convertHeifToJpegNode(input, { quality, maxInputBytes });
+    return await convertHeifToJpegNode(input, { quality, maxInputBytes, maxDecodePixels });
   } catch (nodeError) {
     const sipsReason =
       typeof input === 'string'

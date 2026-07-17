@@ -6,7 +6,7 @@
  */
 import { describe, expect, test, vi } from 'vitest';
 import sharp from 'sharp';
-import { convertHeifToJpegNode, extractIccFromHeif } from '../index.js';
+import { convertHeifToJpeg, convertHeifToJpegNode, extractIccFromHeif } from '../index.js';
 
 const decodeMock = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -93,6 +93,15 @@ describe('#63: declared-dimension pre-check before decode', () => {
   test('respects a caller-supplied maxDecodePixels', async () => {
     const crafted = buildMeta(1, [buildIspe(100, 100)]);
     await expect(convertHeifToJpegNode(crafted, { maxDecodePixels: 100 })).rejects.toThrow(
+      /100x100.*decode limit/s,
+    );
+  });
+
+  test('the public wrapper forwards maxDecodePixels to the Node fallback', async () => {
+    // Buffer input always takes the Node path inside convertHeifToJpeg; a
+    // stricter caller-supplied cap must survive the wrapper hop.
+    const crafted = buildMeta(1, [buildIspe(100, 100)]);
+    await expect(convertHeifToJpeg(crafted, { maxDecodePixels: 100 })).rejects.toThrow(
       /100x100.*decode limit/s,
     );
   });
