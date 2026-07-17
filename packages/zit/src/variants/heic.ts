@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { hasFileBinary } from './feature-detect.js';
-import { isMissingBinaryError, run } from './run.js';
+import { isMissingBinaryError, resolveBinaryPath, run } from './run.js';
 
 const HEIC_EXTENSIONS = new Set(['.heic', '.heif']);
 const JPEG_EXTENSIONS = new Set(['.jpg', '.jpeg']);
@@ -26,7 +26,7 @@ function isNonImageMimeType(mimeType: string): boolean {
 async function identify(inputPath: string): Promise<string | null> {
   if (!(await hasFileBinary())) return null;
   try {
-    const { stdout } = await run('file', ['-b', '--mime-type', inputPath]);
+    const { stdout } = await run('file', ['-b', '--mime-type', resolveBinaryPath(inputPath)]);
     return stdout.trim();
   } catch (error) {
     if (isMissingBinaryError(error)) return null;
