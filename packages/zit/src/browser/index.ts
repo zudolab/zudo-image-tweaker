@@ -1,2 +1,20 @@
-// Stub — implemented in https://github.com/zudolab/zudo-image-tweaker/issues/11
-export {};
+/**
+ * Client-safe subpath: browser upload-preparation pipeline. Must never
+ * import `sharp` or any `node:` builtin — see `browser-chunk-guard.test.ts`.
+ */
+export {
+  prepareImageForUpload,
+  HEIC_DECODE_FAILED_MESSAGE,
+  ORIENTATION_BAKE_FAILED_MESSAGE_PREFIX,
+  type PrepareImageForUploadOptions,
+  type PreparedImage,
+} from './prepare-upload';
+export {
+  deriveGeometry,
+  deriveOrientation,
+  roundAspectRatio,
+  type Dimensions,
+  type DerivedGeometry,
+  type Orientation,
+} from './orientation';
+export { needsOrientationBake } from './exif-orientation';
