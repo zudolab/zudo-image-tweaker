@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import xxhash from 'xxhash-wasm';
-import type { VariantMetadata } from './types.js';
+import type { TagMode, VariantMetadata } from './types.js';
 
 /** The engine's per-image cache sidecar. Purely internal — not a metadata DB. */
 export interface CacheEntry {
@@ -14,8 +14,23 @@ export interface CacheEntry {
    * even when the source bytes are unchanged.
    */
   configHash: string;
+  /**
+   * The tag mode the cached outputs were produced under. Renaming a source
+   * to change only its tag (e.g. `photo__og.jpg` → `photo__ogonly.jpg`)
+   * keeps the same bytes and slug, so the mode is compared to stop the old
+   * outputs from satisfying the new mode's expected-output subset.
+   */
+  mode: TagMode;
   /** Whether the source was handled as an animated-GIF passthrough. */
   animated: boolean;
+  /**
+   * The exact filenames this run emitted into the slug directory. Compared
+   * against the current config's expected filenames so a changed custom
+   * `outputName` scheme — including at the sub-min-width fallback, which the
+   * config fingerprint can't capture pre-probe — is treated as a miss rather
+   * than a stale hit on a lingering older-scheme file.
+   */
+  outputs: string[];
   /** Last emitted metadata record (null for OGP-only images), replayed on a cache hit. */
   metadata: VariantMetadata | null;
 }

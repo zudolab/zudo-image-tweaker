@@ -127,8 +127,13 @@ function isSafeSlug(slug: string): boolean {
  * A stable fingerprint of the output-affecting config, stored alongside the
  * source hash so a rerun with a changed quality/OGP/blurhash/orientation
  * option invalidates the cache even when the source bytes are identical.
- * (widths/formats/outputName changes are already caught by missing-output
- * detection since they alter filenames, but they're included for safety.)
+ *
+ * The custom `outputName` naming scheme is deliberately NOT fingerprinted
+ * here: the emitted filenames depend on the (not-yet-probed) source width
+ * for the sub-min-width fallback, so a pre-probe fingerprint can't capture
+ * them. Naming identity is enforced instead by the persisted output manifest
+ * (`CacheEntry.outputs`), compared in the cache check — which also covers
+ * that fallback filename.
  */
 function fingerprintConfig(cfg: ResolvedConfig): string {
   return JSON.stringify({
@@ -141,6 +146,14 @@ function fingerprintConfig(cfg: ResolvedConfig): string {
     bakeExifOrientation: cfg.bakeExifOrientation,
     stripMetadata: cfg.stripMetadata,
   });
+}
+
+/** Order-independent equality of two filename lists (the output manifest). */
+function sameFileSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((name, i) => name === sortedB[i]);
 }
 
 function applyFormat(pipeline: Sharp, format: string, quality: number): Sharp {
@@ -296,9 +309,20 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
   // source bytes are unchanged.
   const fileHash = await hashFile(inputPath);
   const cache = await readCache(cachePath);
-  if (cache && cache.hash === fileHash && cache.configHash === configHash) {
+  // `cache.mode` gates on the tag pipeline too: a pre-`mode` (older-format)
+  // entry has it undefined and so never matches, which safely forces a
+  // one-time reprocess rather than a crash.
+  if (cache && cache.hash === fileHash && cache.configHash === configHash && cache.mode === mode) {
     const expected = expectedOutputs(mode, cache, inputPath, cfg);
-    if (expected && (await allExist(imageOutputDir, expected))) {
+    // The manifest guards against a stale hit under a changed naming scheme:
+    // the current config's expected filenames must match the ones the cached
+    // run actually emitted (older entries without `outputs` never match).
+    if (
+      expected &&
+      Array.isArray(cache.outputs) &&
+      sameFileSet(expected, cache.outputs) &&
+      (await allExist(imageOutputDir, expected))
+    ) {
       if (cache.metadata) await cfg.onMetadata?.(cache.metadata);
       return {
         ...base,
@@ -352,8 +376,15 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     } catch (error) {
       throw new VariantProcessingError('ogp', error);
     }
-    await writeCache(cachePath, { hash: fileHash, configHash, animated: false, metadata: null });
-    return { ...base, status: 'processed', animated: false, variants: [], ogp, metadata: null };
+    await writeCache(cachePath, {
+      hash: fileHash,
+      configHash,
+      mode,
+      animated,
+      outputs: [ogp.filename],
+      metadata: null,
+    });
+    return { ...base, status: 'processed', animated, variants: [], ogp, metadata: null };
   }
 
   let blurhash: string | null;
@@ -382,11 +413,21 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     // orientation via `/exif` also strips metadata, so stripMetadata routes
     // through it too — stripping the EXIF tag without baking would leave a
     // sideways image once the variant pipeline auto-orients.
+    // OGP is tagged with its own stage so a failure there is reported as
+    // 'ogp', not 'variants' — but it still runs inside runPipeline so a
+    // corruption that only surfaces at OGP shares the single repair+retry.
     const runPipeline = async (src: string | Buffer) => {
       const oriented = cfg.bakeExifOrientation || cfg.stripMetadata ? await bakeOrientation(src) : src;
       const bh = await tryBlurhash(oriented, slug, cfg.fallbackBlurhash);
       const vs = await generateVariants(oriented, imageOutputDir, displayWidth, cfg);
-      const og = mode === 'og' ? await generateOgp(oriented, imageOutputDir, cfg) : null;
+      let og: OgpOutput | null = null;
+      if (mode === 'og') {
+        try {
+          og = await generateOgp(oriented, imageOutputDir, cfg);
+        } catch (error) {
+          throw new VariantProcessingError('ogp', error);
+        }
+      }
       return { blurhash: bh, variants: vs, ogp: og };
     };
 
@@ -394,11 +435,19 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     try {
       pipeline = await runPipeline(processInput);
     } catch (error) {
+      // A stage-tagged OGP failure carries the underlying error as `cause`;
+      // unwrap it so the repair check sees the real corruption signature.
+      const cause = error instanceof VariantProcessingError ? error.cause : error;
       const repaired =
-        cfg.autoRepair && typeof processInput === 'string' && isCorruptionError(error)
+        cfg.autoRepair && typeof processInput === 'string' && isCorruptionError(cause)
           ? await repairCorruptedImage(processInput)
           : null;
-      if (!repaired) throw new VariantProcessingError('variants', error);
+      if (!repaired) {
+        // Preserve the originating stage ('ogp' when OGP threw), defaulting
+        // the untagged bake/blurhash/variants failures to 'variants'.
+        if (error instanceof VariantProcessingError) throw error;
+        throw new VariantProcessingError('variants', error);
+      }
       pipeline = await runPipeline(repaired);
     }
     ({ blurhash, variants, ogp } = pipeline);
@@ -419,8 +468,13 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     record.originalFormat = originalFormat;
   }
 
+  const outputs = [
+    ...variants.map((v) => v.filename),
+    ...(ogp ? [ogp.filename] : []),
+    ...(animated ? [passthroughName(inputPath)] : []),
+  ];
   try {
-    await writeCache(cachePath, { hash: fileHash, configHash, animated, metadata: record });
+    await writeCache(cachePath, { hash: fileHash, configHash, mode, animated, outputs, metadata: record });
   } catch (error) {
     throw new VariantProcessingError('cache', error);
   }
@@ -494,11 +548,15 @@ async function cleanupOrphans(outputDir: string, keepSlugs: Set<string>): Promis
  */
 export async function processImages(config: ProcessImagesConfig): Promise<ProcessSummary> {
   const cfg = resolveConfig(config);
+  // Validate up front (as compositeBatch does): NaN would make the pool
+  // empty and silently process nothing; Infinity would drop the bound.
+  const concurrency = config.concurrency ?? DEFAULT_CONCURRENCY;
+  if (!Number.isFinite(concurrency) || concurrency < 1) {
+    throw new Error(
+      `processImages: concurrency must be a finite number >= 1, received ${concurrency}`,
+    );
+  }
   const paths = await collectFiles(config);
-  const entries: ImageEntry[] = paths.map((inputPath) => ({
-    inputPath,
-    tag: cfg.tagParser(path.basename(inputPath)),
-  }));
 
   const results: ItemResult[] = [];
   const failed: ProcessFailure[] = [];
@@ -507,6 +565,25 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
     failed.push(failure);
     await cfg.onError?.(failure);
   };
+
+  // Parse each filename's tag inside the collect-and-continue path: a custom
+  // tagParser that throws for one file records a 'slug'-stage failure and
+  // keeps going, rather than rejecting the whole batch.
+  const entries: ImageEntry[] = [];
+  let tagParseFailed = false;
+  for (const inputPath of paths) {
+    try {
+      entries.push({ inputPath, tag: cfg.tagParser(path.basename(inputPath)) });
+    } catch (error) {
+      tagParseFailed = true;
+      await report({
+        inputPath,
+        slug: path.basename(inputPath),
+        stage: 'slug',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   // Two inputs that normalise to the same slug would race on one output
   // directory (and thrash each other's cache on later runs), so any slug
@@ -535,7 +612,7 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
     }
   }
 
-  await mapWithConcurrency(unique, config.concurrency ?? DEFAULT_CONCURRENCY, async (entry) => {
+  await mapWithConcurrency(unique, concurrency, async (entry) => {
     try {
       results.push(await processOne(entry, config));
     } catch (error) {
@@ -549,10 +626,14 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
   });
 
   // Keep every slug an input maps to (including duplicated ones) so cleanup
-  // never deletes a directory that still corresponds to a source file.
-  const removed = config.cleanupOrphans
-    ? await cleanupOrphans(cfg.outputDir, new Set(entries.map((e) => e.tag!.slug)))
-    : [];
+  // never deletes a directory that still corresponds to a source file. A
+  // thrown tagParser leaves its input out of `entries`, so its slug is
+  // unknown and can't be added to the keep-set — skip cleanup entirely in
+  // that case rather than risk deleting that input's still-backed outputs.
+  const removed =
+    config.cleanupOrphans && !tagParseFailed
+      ? await cleanupOrphans(cfg.outputDir, new Set(entries.map((e) => e.tag!.slug)))
+      : [];
 
   return { results, failed, removed };
 }
