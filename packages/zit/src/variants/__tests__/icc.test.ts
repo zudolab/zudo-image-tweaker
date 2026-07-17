@@ -163,7 +163,7 @@ describe('variants: ICC colour management (issue #71)', () => {
     const untaggedColour = await renderedPixel(untagged);
     expect(Math.abs(sourceColour[0] - untaggedColour[0]) + Math.abs(sourceColour[1] - untaggedColour[1])).toBeGreaterThan(TOLERANCE);
 
-    mockConvert.mockResolvedValue({ buffer: intermediate, width: 400, height: 400, iccApplied: true });
+    mockConvert.mockResolvedValue({ buffer: intermediate, width: 400, height: 400, iccApplied: true, converter: 'node' });
     const heicPath = path.join(inputDir, 'photo.heic');
     await fs.writeFile(heicPath, Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]));
 
