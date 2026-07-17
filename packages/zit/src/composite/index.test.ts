@@ -97,9 +97,10 @@ describe('compositeOverlay', () => {
     expectColor(await pixelAt(buffer, 74, 85), RED);
   });
 
-  it('derives both horizontal and vertical padding from the base width', async () => {
-    // Non-square base: padding must be baseWidth-relative on the vertical
-    // axis too (matches the ported source behavior), not baseHeight-relative.
+  it('derives both overlay size and padding from the base image shorter side', async () => {
+    // Non-square (landscape) base: size/padding must be relative to the
+    // SHORTER side (height=100), not baseWidth, so the badge always fits on
+    // the narrow axis.
     const base = await solidPng(200, 100, RED);
     const overlay = await solidPng(10, 10, BLUE);
 
@@ -108,11 +109,44 @@ describe('compositeOverlay', () => {
       paddingPercent: 10,
     });
 
-    // overlaySizePx = round(200 * 0.10) = 20, paddingPx = round(200 * 0.10) = 20.
-    // left = 200 - 20 - 20 = 160, top = 100 - 20 - 20 = 60.
-    expectColor(await pixelAt(buffer, 170, 70), BLUE);
-    expectColor(await pixelAt(buffer, 159, 70), RED);
-    expectColor(await pixelAt(buffer, 170, 59), RED);
+    // minSide = 100. overlaySizePx = round(100 * 0.10) = 10, paddingPx = round(100 * 0.10) = 10.
+    // left = 200 - 10 - 10 = 180, top = 100 - 10 - 10 = 80.
+    expectColor(await pixelAt(buffer, 185, 85), BLUE);
+    expectColor(await pixelAt(buffer, 179, 85), RED);
+    expectColor(await pixelAt(buffer, 185, 79), RED);
+  });
+
+  it('fits a badge on an extreme landscape base without overflowing the narrow axis (issue #77)', async () => {
+    // Very wide, short base: sizing off baseWidth alone (the old bug) would
+    // make the overlay taller than the whole base and either throw from sharp
+    // or push top negative. Sizing off the shorter side keeps it fully inside.
+    const base = await solidPng(1000, 100, RED);
+    const overlay = await solidPng(20, 20, BLUE);
+
+    const { buffer, width, height } = await compositeOverlay(base, overlay, {
+      widthPercent: 20,
+      paddingPercent: 5,
+    });
+
+    expect(width).toBe(1000);
+    expect(height).toBe(100);
+
+    // minSide = 100. overlaySizePx = round(100*0.20) = 20, paddingPx = round(100*0.05) = 5.
+    // left = 1000 - 20 - 5 = 975, top = 100 - 20 - 5 = 75.
+    expectColor(await pixelAt(buffer, 980, 80), BLUE);
+    expectColor(await pixelAt(buffer, 974, 80), RED);
+    expectColor(await pixelAt(buffer, 980, 74), RED);
+  });
+
+  it('rejects when the overlay plus padding cannot fit within the base image', async () => {
+    // minSide = 40. overlaySizePx = round(40*0.5) = 20, paddingPx = round(40*0.6) = 24.
+    // top = 40 - 20 - 24 = -4 → negative, so the base can't fit the badge vertically.
+    const base = await solidPng(200, 40, RED);
+    const overlay = await solidPng(10, 10, BLUE);
+
+    await expect(
+      compositeOverlay(base, overlay, { widthPercent: 50, paddingPercent: 60 }),
+    ).rejects.toThrow(/does not fit/i);
   });
 
   it('defaults position to bottom-right when omitted', async () => {

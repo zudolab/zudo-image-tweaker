@@ -342,10 +342,17 @@ export async function trimPadSquare(
   const { img, width, height } = await loadOriented(input);
 
   // Read raw pixels (on a clone so `img` stays a pristine pipeline) and locate
-  // the content bounding box.
+  // the content bounding box. Flatten onto `background` FIRST: a transparent
+  // border otherwise carries whatever RGB its (irrelevant) hidden pixels
+  // happen to hold — often far from "near-white" — so it gets misread as
+  // content instead of background. Flattening makes a transparent pixel
+  // read exactly as the intended pad color, matching how the final square
+  // canvas actually renders it. The extracted content itself (below) is
+  // still pulled from the un-flattened `img`, so real alpha is preserved.
   const { data, info } = await img
     .clone()
     .ensureAlpha()
+    .flatten({ background })
     .raw()
     .toBuffer({ resolveWithObject: true });
   const bbox = contentBBox(data, info.width, info.height, info.channels, threshold);

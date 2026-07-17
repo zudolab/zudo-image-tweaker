@@ -122,4 +122,70 @@ describe('generateShadowLayers', () => {
   it('rejects when the alpha image has no readable dimensions', async () => {
     await expect(generateShadowLayers(Buffer.from('not an image'))).rejects.toThrow();
   });
+
+  it('clamps out-of-range contact-shadow opacity instead of wrapping the raw buffer (issue #77)', async () => {
+    const image = await createAlphaRectImage(CANVAS, SQUARE);
+    // opacity=1 is the max valid value; opacity=8 exercises the pre-fix wrap
+    // (8*255 mod 256 would flip a fully-covered pixel to a near-zero byte).
+    const clampedRef = await generateShadowLayers(image, {
+      mode: 'grounded',
+      contactShadow: { blur: 0.3, opacity: 1, offsetX: 0, offsetY: 0 },
+    });
+    const overOpacity = await generateShadowLayers(image, {
+      mode: 'grounded',
+      contactShadow: { blur: 0.3, opacity: 8, offsetX: 0, offsetY: 0 },
+    });
+
+    const refAlpha = await readAlphaChannel(clampedRef[3].buffer);
+    const overAlpha = await readAlphaChannel(overOpacity[3].buffer);
+    const cx = SQUARE.left + SQUARE.width / 2;
+    const cy = SQUARE.top + SQUARE.height / 2;
+
+    // Clamped to opacity=1: fully covered center should be at (or very near) 255,
+    // not a wrapped-low byte value.
+    expect(alphaAt(overAlpha, cx, cy)).toBeGreaterThan(200);
+    expect(alphaAt(overAlpha, cx, cy)).toBe(alphaAt(refAlpha, cx, cy));
+  });
+
+  it('clamps out-of-range bottom-shadow opacity instead of wrapping the raw buffer (issue #77)', async () => {
+    const image = await createAlphaRectImage(CANVAS, SQUARE);
+    const clampedRef = await generateShadowLayers(image, {
+      mode: 'grounded',
+      bottomShadows: [{ blur: 0.3, offsetX: 0, offsetY: 0, fadeStartRatio: 0, opacity: 1 }],
+    });
+    const overOpacity = await generateShadowLayers(image, {
+      mode: 'grounded',
+      bottomShadows: [{ blur: 0.3, offsetX: 0, offsetY: 0, fadeStartRatio: 0, opacity: 5 }],
+    });
+
+    const refAlpha = await readAlphaChannel(clampedRef[1].buffer);
+    const overAlpha = await readAlphaChannel(overOpacity[1].buffer);
+    const centerX = SQUARE.left + SQUARE.width / 2;
+    const belowMidY = SQUARE.top + SQUARE.height + 5;
+
+    expect(alphaAt(overAlpha, centerX, belowMidY)).toBe(alphaAt(refAlpha, centerX, belowMidY));
+  });
+
+  it('clamps out-of-range vignette strength instead of wrapping the raw buffer (issue #77)', async () => {
+    const image = await createAlphaRectImage(CANVAS, null);
+    const clampedRef = await generateShadowLayers(image, {
+      mode: 'grounded',
+      vignette: { strength: 1 },
+    });
+    const overStrength = await generateShadowLayers(image, {
+      mode: 'grounded',
+      vignette: { strength: 6 },
+    });
+
+    const refAlpha = await readAlphaChannel(clampedRef[0].buffer);
+    const overAlpha = await readAlphaChannel(overStrength[0].buffer);
+
+    // Farthest corner from the light source: darkness saturates at strength*255.
+    // Pre-fix, strength=6 would compute darkness=1530, wrapping mod 256 to a
+    // low byte instead of clamping to 255.
+    expect(alphaAt(overAlpha, CANVAS - 1, CANVAS - 1)).toBe(
+      alphaAt(refAlpha, CANVAS - 1, CANVAS - 1),
+    );
+    expect(alphaAt(overAlpha, CANVAS - 1, CANVAS - 1)).toBeGreaterThan(200);
+  });
 });
