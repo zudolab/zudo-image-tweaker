@@ -16,11 +16,11 @@ function enoent(): NodeJS.ErrnoException {
   return Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
 }
 
-/** `file --version` succeeds; `file <path>` returns the supplied description. */
-function fileSays(description: string) {
+/** `file --version` succeeds; `file -b --mime-type <path>` returns the supplied MIME type. */
+function fileSays(mimeType: string) {
   mockRun.mockImplementation(async (_command: string, args: string[]) => {
     if (args.includes('--version')) return { stdout: 'file-5.x', stderr: '' };
-    return { stdout: description, stderr: '' };
+    return { stdout: mimeType, stderr: '' };
   });
 }
 
@@ -37,13 +37,28 @@ describe('isHeicSource', () => {
   });
 
   it('sniffs a HEIF payload wearing a .jpg extension', async () => {
-    fileSays('/x/a.jpg: ISO Media, HEIF Image');
+    fileSays('image/heif');
     expect(await isHeicSource('/x/a.jpg')).toBe(true);
-    expect(mockRun).toHaveBeenCalledWith('file', ['/x/a.jpg']);
+    expect(mockRun).toHaveBeenCalledWith('file', ['-b', '--mime-type', '/x/a.jpg']);
+  });
+
+  it('sniffs a HEIC payload wearing a .jpg extension', async () => {
+    fileSays('image/heic');
+    expect(await isHeicSource('/x/a.jpg')).toBe(true);
+  });
+
+  it('sniffs a HEIF sequence (burst/live-photo) payload wearing a .jpg extension', async () => {
+    fileSays('image/heif-sequence');
+    expect(await isHeicSource('/x/a.jpg')).toBe(true);
+  });
+
+  it('sniffs a HEIC sequence (burst/live-photo) payload wearing a .jpg extension', async () => {
+    fileSays('image/heic-sequence');
+    expect(await isHeicSource('/x/a.jpg')).toBe(true);
   });
 
   it('leaves a genuine JPEG alone', async () => {
-    fileSays('/x/a.jpg: JPEG image data, JFIF standard');
+    fileSays('image/jpeg');
     expect(await isHeicSource('/x/a.jpg')).toBe(false);
   });
 
@@ -57,26 +72,56 @@ describe('isHeicSource', () => {
     expect(await isHeicSource('/x/a.jpg')).toBe(false);
     expect(await isHeicSource('/x/a.heic')).toBe(true);
   });
+
+  it('processes a genuine JPEG under a directory named HEIC-converted/ correctly', async () => {
+    fileSays('image/jpeg');
+    expect(await isHeicSource('/photos/HEIC-converted/a.jpg')).toBe(false);
+  });
+
+  it('still detects a real HEIF payload under a directory named HEIC-converted/', async () => {
+    fileSays('image/heif');
+    expect(await isHeicSource('/photos/HEIC-converted/a.jpg')).toBe(true);
+  });
 });
 
 describe('isNonImageFile', () => {
   it('flags an HTML error page saved as an image', async () => {
-    fileSays('/x/a.jpg: HTML document, ASCII text');
+    fileSays('text/html');
     expect(await isNonImageFile('/x/a.jpg')).toBe(true);
   });
 
   it('flags a plain-text file', async () => {
-    fileSays('/x/a.png: ASCII text');
+    fileSays('text/plain');
     expect(await isNonImageFile('/x/a.png')).toBe(true);
   });
 
+  it('flags an XML response saved as an image', async () => {
+    fileSays('text/xml');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(true);
+  });
+
+  it('flags a CSV response saved as an image', async () => {
+    fileSays('text/csv');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(true);
+  });
+
   it('passes a real image through', async () => {
-    fileSays('/x/a.jpg: JPEG image data');
+    fileSays('image/jpeg');
     expect(await isNonImageFile('/x/a.jpg')).toBe(false);
   });
 
   it('cannot determine anything when `file` is unavailable (returns false)', async () => {
     mockRun.mockRejectedValue(enoent());
     expect(await isNonImageFile('/x/a.jpg')).toBe(false);
+  });
+
+  it('passes a genuine image through even under a directory named HTML-exports/', async () => {
+    fileSays('image/jpeg');
+    expect(await isNonImageFile('/photos/HTML-exports/a.jpg')).toBe(false);
+  });
+
+  it('still flags a real HTML document under a directory named HTML-exports/', async () => {
+    fileSays('text/html');
+    expect(await isNonImageFile('/photos/HTML-exports/a.jpg')).toBe(true);
   });
 });
