@@ -1,0 +1,160 @@
+---
+title: variants
+description: Multi-width responsive image variant engine with caching, HEIC handling, and OGP dispatch.
+sidebar_position: 2
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/variants` is the package's batch engine: given a
+directory (or list) of source images, it emits a ladder of resized WebP (or
+other format) variants per image, an optional Open Graph card, and a
+[blurhash](https://github.com/woltapp/blurhash) placeholder — all behind a
+content-hash cache so a rerun with unchanged sources is nearly free. It also
+handles HEIC/HEIF sources transparently (via `/heif`) and attempts corruption
+repair via optional external binaries before giving up on a file.
+
+## Exports
+
+```ts
+function processImages(config: ProcessImagesConfig): Promise<ProcessSummary>;
+function processOne(entry: ImageEntry, config: ProcessOneConfig): Promise<ItemResult>;
+function selectVariantWidths(sourceWidth: number, widths: number[]): number[];
+
+class VariantProcessingError extends Error {
+  readonly stage:
+    | 'slug'
+    | 'heic'
+    | 'probe'
+    | 'variants'
+    | 'ogp'
+    | 'passthrough'
+    | 'cache'
+    | 'unknown';
+}
+
+const defaultTagParser: TagParser;
+const noTagParser: TagParser;
+
+const PHOTO_VARIANT_WIDTHS: number[]; // [400, 800, 1600]
+const photoVariantsPreset: Partial<ProcessOneConfig>;
+
+const DEFAULT_WIDTHS: number[]; // [600, 900, 1200, 1600, 2000]
+const DEFAULT_QUALITY: number; // 85
+const DEFAULT_FORMATS: string[]; // ['webp']
+const DEFAULT_CONCURRENCY: number; // 4
+const DEFAULT_OGP_FILENAME: string; // 'ogp.jpg'
+const DEFAULT_CACHE_FILENAME: string; // '.cache.json'
+```
+
+`processImages` scans `inputDir` and/or an explicit `files` list, processes
+entries with bounded concurrency, and never throws for a single bad file —
+each failure lands in `ProcessSummary.failed` (tagged with the pipeline
+`stage` it failed at) while the run continues. `processOne` is the
+single-image primitive `processImages` calls internally; use it directly for
+custom scanning/queueing. It throws `VariantProcessingError` on a genuine
+failure and returns a `status: 'skipped'` result for a deliberate skip (cache
+hit, or the non-image guard tripping).
+
+## Options
+
+`ProcessImagesConfig` extends `ProcessOneConfig` with four batch-only fields
+(`inputDir`, `files`, `concurrency`, `cleanupOrphans`). `processOne` accepts
+just the `ProcessOneConfig` shape.
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `outputDir` | `string` | *required* | Root directory the per-image slug directories are created under. |
+| `inputDir` | `string` | — | Directory scanned for source images (by [supported extension](#caveats-supported-extensions)). Usable together with `files`. |
+| `files` | `string[]` | — | Explicit list of source file paths, added to whatever `inputDir` finds. |
+| `concurrency` | `number` | `4` | Max images processed at once. |
+| `widths` | `number[]` | `[600, 900, 1200, 1600, 2000]` | Responsive widths to emit; a source never gets upscaled past its own width (see [`selectVariantWidths`](#exports)). |
+| `formats` | `string[]` | `['webp']` | Output formats per width — any format `sharp().toFormat()` accepts. |
+| `quality` | `number` | `85` | Encode quality (1-100) for variants and the OGP card. |
+| `outputName` | `(width: number, format: string) => string` | `` `${width}w.${format}` `` | Names each variant file. |
+| `ogpFileName` | `string` | `'ogp.jpg'` | OGP output filename within the slug directory. |
+| `ogpOptions` | `SmartOgpOptions` | `{}` | Extra options forwarded to [`/ogp`'s `generateSmartOgp`](./ogp.mdx). |
+| `cacheFileName` | `string` | `'.cache.json'` | Cache sidecar filename within the slug directory. |
+| `fallbackBlurhash` | `string` | — | blurhash to record when encoding fails. Omitted means the record's `blurhash` is `null` on failure. |
+| `tagParser` | `TagParser` | `defaultTagParser` | Derives `{ mode, slug }` from a filename; see [Filename-tag dispatch](#filename-tag-dispatch). |
+| `autoRepair` | `boolean` | `true` | Attempt corruption repair via `magick`/`ffmpeg` when available (see [Caveats](#caveats)). |
+| `bakeExifOrientation` | `boolean` | `false` | Bake EXIF orientation into pixels (and drop metadata) before encoding, via [`/exif`](./exif.mdx). |
+| `stripMetadata` | `boolean` | `false` | Strip all metadata before encoding. Subsumed by `bakeExifOrientation` — stripping without baking would leave a sideways image once the variant pipeline auto-orients. |
+| `cleanupOrphans` | `boolean` | `false` | Remove output slug directories no longer backed by any input. Only ever touches direct children of `outputDir`. |
+| `onMetadata` | `(record: VariantMetadata) => void \| Promise<void>` | — | Invoked (and awaited) once per produced or cache-hit image. |
+| `onError` | `(report: ProcessFailure) => void \| Promise<void>` | — | Invoked (and awaited) once per failing file. |
+
+## Example
+
+```ts
+import { processImages, photoVariantsPreset } from '@takazudo/zudo-image-tweaker/variants';
+
+const summary = await processImages({
+  ...photoVariantsPreset,
+  inputDir: './photos',
+  outputDir: './public/photos',
+  onMetadata: async (record) => {
+    console.log(record.slug, record.width, record.height, record.blurhash);
+  },
+});
+
+console.log(`processed ${summary.results.length}, failed ${summary.failed.length}`);
+```
+
+`photoVariantsPreset` reproduces a plain-photo pipeline on top of the same
+engine: the `[400, 800, 1600]` width ladder ([`PHOTO_VARIANT_WIDTHS`](#exports)),
+EXIF orientation baked in with metadata stripped, and `noTagParser` so every
+file is treated as a plain full-variant image (no OGP dispatch).
+
+## Filename-tag dispatch
+
+`defaultTagParser` (the default `tagParser`) reads a suffix on the file's
+base name to choose which pipeline a source runs through, then strips the
+suffix from the returned output slug:
+
+| Suffix | Mode | Effect |
+|---|---|---|
+| *(none)* | `'full'` | Width variants + blurhash. No OGP card. |
+| `__og` | `'og'` | Width variants + blurhash, plus an OGP card. |
+| `__ogonly` | `'ogonly'` | Only an OGP card — no width variants, no blurhash. |
+
+`noTagParser` disables this entirely: every file is `'full'`, keyed by its
+bare base name. Pass a custom `TagParser` to define your own vocabulary.
+
+## Caveats
+
+:::warning[HEIC sources are trusted-input only]
+A `.heic`/`.heif` source (or a `.jpg` that `file` sniffs as HEIF) is routed
+through [`/heif`'s `convertHeifToJpeg`](./heif.mdx), which carries the same
+trusted-input-only decoder warning documented there.
+:::
+
+- **External-binary repair is best-effort.** `autoRepair` (default `true`)
+  tries `magick` then `ffmpeg` on sharp decode errors that look like
+  bitstream corruption; on a host with neither installed (e.g. plain Linux
+  without ImageMagick) it warns to the console and leaves the file in
+  `ProcessSummary.failed` rather than failing the whole run.
+- **Duplicate slugs are rejected up front.** Two inputs that normalize to the
+  same output slug (e.g. `photo.jpg` and `photo__og.jpg`) would race on one
+  output directory; `processImages` reports both as failures at the `'slug'`
+  stage instead of processing either.
+- **The cache key covers config, not just file bytes.** A rerun with the
+  same source but a different `quality`, `widths`, `ogpOptions`, or
+  orientation/strip flag invalidates the cache even though the file's
+  content hash is unchanged.
+- **`cleanupOrphans` is a hard-scoped delete.** It only ever removes
+  directories that are direct children of `outputDir` — it will not walk
+  into or above it, even given a maliciously constructed slug.
+- **Animated GIFs pass through, unencoded.** No width variants are
+  generated for them, but a blurhash placeholder still is; a `__og`-tagged
+  animated GIF also gets an OGP card generated from its first frame.
+- **`onMetadata`/`onError` are awaited.** A slow or throwing callback
+  delays (or, if it throws, aborts) the item it's attached to — keep them
+  fast and non-throwing, or wrap your own error handling inside them.
+
+### Supported extensions
+
+`inputDir` scanning matches `jpg`, `jpeg`, `png`, `webp`, `heic`, `heif`,
+`gif`, and `avif` (case-insensitive), exported as `SUPPORTED_IMAGE_EXTENSIONS`
+and `IMAGE_EXTENSION_REGEX`. Files passed explicitly via `files` are not
+filtered by extension.

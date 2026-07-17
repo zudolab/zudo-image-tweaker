@@ -34,6 +34,11 @@ export default defineConfig(
         path: "/docs/claude",
         categoryMatch: "claude",
       },
+      {
+        label: "Reference",
+        path: "/docs/reference",
+        categoryMatch: "reference",
+      },
     ],
     headerRightItems: [
       {

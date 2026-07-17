@@ -16,6 +16,7 @@
     "setup:doc-skill:claude": "bash scripts/setup-doc-skill.sh --target claude",
     "setup:doc-skill:codex": "bash scripts/setup-doc-skill.sh --target codex",
     "setup:doc-skill:both": "bash scripts/setup-doc-skill.sh --target both",
+    "check:examples": "tsc --noEmit -p examples-check/tsconfig.json",
     "b4push": "pnpm check && pnpm build"
   },
   "dependencies": {

@@ -1,0 +1,104 @@
+---
+title: square
+description: Five square-crop and square-pad transforms for turning any aspect ratio into a square.
+sidebar_position: 6
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/square` is a small toolbox of five ways to turn
+an arbitrary-aspect-ratio image into a square, from a plain crop through to
+content-aware trim-then-pad. Every function bakes EXIF orientation into the
+pixels first, so cropping/padding always operates on the *displayed*
+dimensions.
+
+## Exports
+
+```ts
+function cropToSquare(input: Buffer, opts?: CropToSquareOptions): Promise<SquareResult>;
+function padToSquare(input: Buffer, opts?: PadToSquareOptions): Promise<SquareResult>;
+function padToSquareCentered(
+  input: Buffer,
+  opts?: PadToSquareCenteredOptions,
+): Promise<SquareResult>;
+function insetOnSquare(input: Buffer, opts?: InsetOnSquareOptions): Promise<SquareResult>;
+function trimPadSquare(input: Buffer, opts?: TrimPadSquareOptions): Promise<SquareResult>;
+
+interface SquareResult {
+  buffer: Buffer;
+  width: number;
+  height: number;
+}
+```
+
+- **`cropToSquare`** — crops to the shorter side; `anchor` picks which edge
+  of the longer axis to keep.
+- **`padToSquare`** — extends canvas to square, padding *only* the narrow
+  axis's leading edge (content becomes right/bottom-aligned). A square input
+  is a no-op re-encode.
+- **`padToSquareCentered`** — extends canvas to square, padding both edges
+  of the narrow axis symmetrically (content stays centered, no crop).
+- **`insetOnSquare`** — shrinks a (typically already-square) image's content
+  and centers it on a same-size canvas, leaving a proportional border. Insets
+  the *whole* input, so a pre-existing border stacks with the new one.
+- **`trimPadSquare`** — trims the near-background border down to the content
+  bounding box first, *then* pads a square canvas leaving an exact margin —
+  the fix for `insetOnSquare`'s border-stacking behavior on pre-framed
+  images.
+
+## Options
+
+| Name | Type | Default | Effect | Used by |
+|---|---|---|---|---|
+| `anchor` | `'top' \| 'center' \| 'bottom'` | `'center'` | Which edge of the crop axis to keep. See [Anchor semantics](#caveats-anchor-semantics) below. | `cropToSquare` |
+| `background` | `Color` (from `sharp`) | `{ r: 255, g: 255, b: 255, alpha: 1 }` | Fill color for padded area / canvas. | `padToSquare`, `padToSquareCentered`, `insetOnSquare`, `trimPadSquare` |
+| `margin` | `number` (`0 ≤ margin < 0.5`) | `0.1` | Fractional border to leave around the content. | `insetOnSquare`, `trimPadSquare` |
+| `threshold` | `number` (`0`-`255`, integer) | `245` | A pixel counts as background when all of R, G, B are `>=` this value. | `trimPadSquare` |
+
+## Example
+
+```ts
+import { readFile } from 'node:fs/promises';
+import { trimPadSquare } from '@takazudo/zudo-image-tweaker/square';
+
+const source = await readFile('./product.png');
+const { buffer, width, height } = await trimPadSquare(source, {
+  margin: 0.08,
+  background: { r: 255, g: 255, b: 255, alpha: 1 },
+});
+
+console.log(`${width}x${height}, ${buffer.length} bytes`);
+```
+
+## Caveats
+
+### Anchor semantics
+
+`cropToSquare`'s `anchor` names the edge of the crop axis, not an absolute
+screen position — and the crop axis itself flips with orientation:
+
+- **Portrait** (`h > w`, crop is vertical): `top` keeps the top rows,
+  `bottom` keeps the bottom rows.
+- **Landscape** (`w > h`, crop is horizontal): `top` keeps the *left*
+  columns, `bottom` keeps the *right* columns.
+
+### Other caveats
+
+- **A translucent `background` requires an alpha channel on the source,**
+  which `padToSquare`/`padToSquareCentered` ensure internally
+  (`ensureAlpha()`) before extending — otherwise sharp would silently
+  flatten a partial-alpha `background` to opaque.
+- **`insetOnSquare` stacks with any existing border**; it insets the whole
+  input every time. A 10% inset of an image already framed at 10% yields
+  roughly an 18% border, not 10%. Use `trimPadSquare` when the final margin
+  must be exact regardless of input framing.
+- **`trimPadSquare` treats an all-background input as blank** — it emits a
+  `background`-colored square (sized to the larger original side) rather
+  than throwing, since no content bounding box could be found.
+- **Only `insetOnSquare` resamples content; the other four don't (beyond
+  the initial orientation bake).** `cropToSquare`/`padToSquare`/
+  `padToSquareCentered` crop or pad 1:1 with no resizing of the kept
+  pixels; `insetOnSquare` always resizes content into its inset box.
+  `trimPadSquare` also composites the trimmed content 1:1 — no
+  resampling — but the canvas size it pads to is derived from the
+  computed margin, not the original dimensions.
