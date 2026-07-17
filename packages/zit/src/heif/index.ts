@@ -150,6 +150,12 @@ async function tryConvertWithSips(inputPath: string, quality: number): Promise<S
       outPath,
     ]);
   } catch (error) {
+    // A non-zero `sips` exit can still leave a partial `outPath` on disk
+    // (e.g. the documented gain-map failure). This early return skips the
+    // cleanup `finally` below, so remove it here too — otherwise repeated
+    // fallbacks accumulate temp JPEGs. `force` no-ops when nothing was
+    // written (including the ENOENT "sips absent" case).
+    await fs.rm(outPath, { force: true });
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { result: null, error: null };
     }

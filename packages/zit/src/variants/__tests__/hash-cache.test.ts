@@ -62,7 +62,9 @@ describe('readCache / writeCache', () => {
     const entry: CacheEntry = {
       hash: 'deadbeef',
       configHash: '{"quality":85}',
+      mode: 'full',
       animated: false,
+      outputs: ['600w.webp', '900w.webp'],
       metadata: {
         slug: 'x',
         blurhash: 'LEHV6nWB',
