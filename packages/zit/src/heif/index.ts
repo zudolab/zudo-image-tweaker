@@ -44,15 +44,12 @@
  * container's irot/imir transforms to the pixels.
  */
 
-import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import sharp from 'sharp';
-
-const execFileAsync = promisify(execFile);
+import { isMissingBinaryError, resolveBinaryPath, run } from '../variants/run.js';
 
 const DEFAULT_QUALITY = 90;
 const DEFAULT_MAX_INPUT_BYTES = 256 * 1024 * 1024;
@@ -183,12 +180,15 @@ async function tryConvertWithSips(
   // randomUUID (not just pid+timestamp) avoids output-path collisions
   // between concurrent conversions in the same process.
   const outPath = path.join(os.tmpdir(), `heif-sips-${process.pid}-${randomUUID()}.jpg`);
-  // Resolved before it reaches `sips`' argv so a bare leading-dash relative
-  // filename (e.g. `-rf.heic`) can never be parsed as an option flag
-  // (issue #66).
-  const resolvedInputPath = path.resolve(inputPath);
   try {
-    await execFileAsync(
+    // Shared hardened exec seam (variants/run.ts): argument array (never a
+    // shell string), the input path resolved before it reaches argv so a
+    // leading-dash relative filename can't be read as an option flag (issue
+    // #66), and a SIGKILL-enforced timeout (issue #67) so a hung `sips`
+    // can't stall the caller. On timeout `run` rejects, which this catch
+    // treats like any other non-ENOENT sips failure and falls through to
+    // the Node/WASM path.
+    await run(
       'sips',
       [
         '-s',
@@ -197,14 +197,11 @@ async function tryConvertWithSips(
         '-s',
         'formatOptions',
         String(quality),
-        resolvedInputPath,
+        resolveBinaryPath(inputPath),
         '--out',
         outPath,
       ],
-      // SIGKILL (not SIGTERM) so a `sips` process that ignores or handles
-      // SIGTERM can't defeat the timeout (see variants/run.ts's RunOptions
-      // doc for the same reasoning).
-      { timeout: timeoutMs, killSignal: 'SIGKILL' },
+      { timeoutMs },
     );
   } catch (error) {
     // A non-zero `sips` exit can still leave a partial `outPath` on disk
@@ -213,7 +210,7 @@ async function tryConvertWithSips(
     // fallbacks accumulate temp JPEGs. `force` no-ops when nothing was
     // written (including the ENOENT "sips absent" case).
     await fs.rm(outPath, { force: true });
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (isMissingBinaryError(error)) {
       return { result: null, error: null };
     }
     return { result: null, error: error as Error };

@@ -113,10 +113,19 @@ describe('HEIC/HEIF sips feature detection', () => {
       .toBuffer();
 
     execFileMock.mockImplementation(
-      (_file: string, args: string[], _options: unknown, callback: (err: unknown) => void) => {
+      (
+        _file: string,
+        args: string[],
+        _options: unknown,
+        callback: (err: unknown, result?: { stdout: string; stderr: string }) => void,
+      ) => {
         const outIndex = args.indexOf('--out');
         writeFileSync(args[outIndex + 1], fixtureJpeg);
-        callback(null);
+        // The shared `run` seam (variants/run.ts) destructures { stdout,
+        // stderr } from the promisified result, so a bare callback(null) —
+        // which the previous hand-rolled execFileAsync ignored — must now
+        // hand back a result object.
+        callback(null, { stdout: '', stderr: '' });
       },
     );
 
