@@ -5,7 +5,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import sharp from 'sharp';
-import { convertHeifToJpeg, convertHeifToJpegNode, extractIccFromHeif } from '../index.js';
+import exifr from 'exifr';
+import {
+  convertHeifToJpeg,
+  convertHeifToJpegNode,
+  extractExifFromHeif,
+  extractIccFromHeif,
+} from '../index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = path.join(__dirname, 'fixtures');
@@ -56,6 +62,7 @@ describe('convertHeifToJpegNode (real fixtures)', () => {
     expect(result.width).toBe(3024);
     expect(result.height).toBe(3024);
     expect(result.iccApplied).toBe(true);
+    expect(result.converter).toBe('node');
 
     const metadata = await sharp(result.buffer).metadata();
     expect(metadata.icc).toBeDefined();
@@ -104,6 +111,40 @@ describe('convertHeifToJpegNode (real fixtures)', () => {
   });
 });
 
+describe('Node fallback retains source EXIF (#36)', () => {
+  test('extractExifFromHeif pulls a TIFF-format EXIF block from an EXIF-bearing fixture', () => {
+    const buffer = fs.readFileSync(TMAP_FIXTURE);
+    const tiff = extractExifFromHeif(buffer);
+
+    expect(tiff).not.toBeNull();
+    expect(['II', 'MM']).toContain(tiff!.toString('latin1', 0, 2));
+  });
+
+  test('Node-fallback JPEG output carries the source EXIF tags', async () => {
+    const source = await exifr.parse(TMAP_FIXTURE, ['Make', 'Model', 'DateTimeOriginal']);
+    expect(source.Make).toBe('Apple'); // fixture sanity: the source really has EXIF
+
+    const result = await convertHeifToJpegNode(TMAP_FIXTURE, { quality: 90 });
+    const output = await exifr.parse(result.buffer, ['Make', 'Model', 'DateTimeOriginal']);
+
+    expect(output.Make).toBe(source.Make);
+    expect(output.Model).toBe(source.Model);
+    expect(output.DateTimeOriginal).toEqual(source.DateTimeOriginal);
+  });
+
+  test('EXIF Orientation in the output is neutralised to 1 (decoder already applied irot/imir)', async () => {
+    const result = await convertHeifToJpegNode(ROTATION_FIXTURE, { quality: 90 });
+
+    // decoded pixels are already display-oriented (portrait)
+    expect(result.width).toBe(4284);
+    expect(result.height).toBe(5712);
+
+    const metadata = await sharp(result.buffer).metadata();
+    expect(metadata.exif).toBeDefined();
+    expect(metadata.orientation ?? 1).toBe(1);
+  });
+});
+
 describe('convertHeifToJpeg (wrapper, real fixture)', () => {
   test('succeeds end-to-end via the sips-or-Node wrapper', async () => {
     // On Linux (this test environment) `sips` doesn't exist, so this
@@ -111,6 +152,7 @@ describe('convertHeifToJpeg (wrapper, real fixture)', () => {
     // exercise sips directly. Both are valid outcomes for this test.
     const result = await convertHeifToJpeg(TMAP_FIXTURE, { quality: 90 });
 
+    expect(['sips', 'node']).toContain(result.converter);
     const metadata = await sharp(result.buffer).metadata();
     expect(metadata.width).toBe(3024);
     expect(metadata.height).toBe(3024);
@@ -157,6 +199,7 @@ describe('hardening: sips failure (not just ENOENT) falls back to Node', () => {
     expect(result.width).toBe(3024);
     expect(result.height).toBe(3024);
     expect(result.iccApplied).toBe(true);
+    expect(result.converter).toBe('node');
   });
 });
 
