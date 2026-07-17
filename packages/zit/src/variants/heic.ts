@@ -5,11 +5,21 @@ import { isMissingBinaryError, run } from './run.js';
 const HEIC_EXTENSIONS = new Set(['.heic', '.heif']);
 const JPEG_EXTENSIONS = new Set(['.jpg', '.jpeg']);
 
+const HEIC_MIME_TYPES = new Set(['image/heic', 'image/heif']);
+const NON_IMAGE_MIME_TYPES = new Set(['text/html', 'text/plain']);
+
+/**
+ * Returns the exact MIME type reported by `file -b --mime-type` (e.g.
+ * `image/heic`), never the default human-readable output. The default
+ * output is prefixed with the echoed file path unless `-b` is passed, so
+ * a path substring (e.g. a directory named `HTML-exports/`) would
+ * otherwise corrupt a naive substring match against the description.
+ */
 async function identify(inputPath: string): Promise<string | null> {
   if (!(await hasFileBinary())) return null;
   try {
-    const { stdout } = await run('file', [inputPath]);
-    return stdout;
+    const { stdout } = await run('file', ['-b', '--mime-type', inputPath]);
+    return stdout.trim();
   } catch (error) {
     if (isMissingBinaryError(error)) return null;
     // A non-ENOENT failure (unreadable path, etc.) leaves identification
@@ -30,8 +40,8 @@ export async function isHeicSource(inputPath: string): Promise<boolean> {
   if (HEIC_EXTENSIONS.has(ext)) return true;
   if (!JPEG_EXTENSIONS.has(ext)) return false;
 
-  const description = await identify(inputPath);
-  return description !== null && (description.includes('HEIF') || description.includes('HEIC'));
+  const mimeType = await identify(inputPath);
+  return mimeType !== null && HEIC_MIME_TYPES.has(mimeType);
 }
 
 /**
@@ -41,7 +51,7 @@ export async function isHeicSource(inputPath: string): Promise<boolean> {
  * can't make the determination.
  */
 export async function isNonImageFile(inputPath: string): Promise<boolean> {
-  const description = await identify(inputPath);
-  if (description === null) return false;
-  return description.includes('HTML') || description.includes('ASCII text');
+  const mimeType = await identify(inputPath);
+  if (mimeType === null) return false;
+  return NON_IMAGE_MIME_TYPES.has(mimeType);
 }
