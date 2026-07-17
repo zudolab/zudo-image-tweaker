@@ -34,8 +34,20 @@ Each module is documented in the [docs site](https://zudo-image-tweaker.takazudo
 
 `@imgly/background-removal-node`, `exifr`, and `heic2any` are optional peer
 dependencies, dynamically imported only by the modules that need them
-(`product-photo`, `exif`, and `browser`/`heif` respectively). Install them
-only if you use those modules.
+(`product-photo`, `exif`, and `browser` respectively). Install them only if
+you use those modules. `/heif`'s HEIC decoder (`heic-decode`) is a regular
+dependency and is always installed.
+
+## Security notes
+
+### `/heif`
+
+`convertHeifToJpeg`'s Node/WASM fallback (`heic-decode` → bundled
+`libheif-js` 1.19.8) predates the libheif 1.22.0 heap-overflow and
+infinite-loop-DoS fixes. Only decode HEIC/HEIF files from sources you
+trust. The `maxInputBytes` option (default 256 MiB) rejects oversized
+inputs before they reach the decoder, but that's defense-in-depth, not a
+substitute for trusting the source.
 
 ## License
 
