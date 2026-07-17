@@ -31,6 +31,17 @@
  * deps; the Node fallback's bundled WASM `libheif-js` doesn't carry that
  * limit, so it also serves as the fallback whenever `sips` is unavailable
  * OR fails on a given input (including that documented limitation).
+ * `ConvertHeifResult.converter` reports which path produced the output.
+ *
+ * Residual Node-fallback divergence from `sips`: files whose wide-gamut
+ * colour is described only by an `nclx` colr box (no embedded ICC
+ * profile) lose that colour description on the Node path — the output
+ * JPEG carries no ICC profile and decodes as sRGB. `sips` converts such
+ * files through the system colour engine and tags the output itself.
+ * Source EXIF, previously also lost on this path, is now copied into the
+ * output (see `extractExifFromHeif`), with the EXIF Orientation tag
+ * neutralised to 1 because the WASM decoder already applies the
+ * container's irot/imir transforms to the pixels.
  */
 
 import { execFile } from 'node:child_process';
@@ -45,12 +56,24 @@ const execFileAsync = promisify(execFile);
 
 const DEFAULT_QUALITY = 90;
 const DEFAULT_MAX_INPUT_BYTES = 256 * 1024 * 1024;
+// sharp's default limitInputPixels (0x3FFF * 0x3FFF). The Node path checks
+// the container's declared dimensions against this BEFORE the WASM decode,
+// because a tiny crafted HEIC declaring huge dimensions would otherwise
+// force a multi-GB allocation inside the decoder before sharp's own pixel
+// limit ever gets a chance to apply.
+const DEFAULT_MAX_DECODE_PIXELS = 0x3fff * 0x3fff;
 
 export interface ConvertHeifToJpegOptions {
   /** JPEG encode quality, 1-100. @default 90 */
   quality?: number;
   /** Reject inputs larger than this many bytes before decoding. @default 268435456 (256 MiB) */
   maxInputBytes?: number;
+  /**
+   * Node path only: reject inputs whose container declares more pixels
+   * than this before the WASM decode. @default 268402689 (sharp's default
+   * limitInputPixels, 0x3FFF x 0x3FFF)
+   */
+  maxDecodePixels?: number;
 }
 
 export interface ConvertHeifResult {
@@ -58,6 +81,13 @@ export interface ConvertHeifResult {
   width: number;
   height: number;
   iccApplied: boolean;
+  /**
+   * Which conversion path produced the output: macOS `sips`, or the
+   * Node/WASM fallback. The fallback diverges from `sips` for nclx-only
+   * wide-gamut files (see the module doc comment), so callers that care
+   * can detect it here.
+   */
+  converter: 'sips' | 'node';
 }
 
 async function inputByteLength(input: string | Buffer): Promise<number> {
@@ -171,6 +201,7 @@ async function tryConvertWithSips(inputPath: string, quality: number): Promise<S
         width: metadata.width ?? 0,
         height: metadata.height ?? 0,
         iccApplied: Boolean(metadata.icc),
+        converter: 'sips',
       },
       error: null,
     };
@@ -203,12 +234,19 @@ export async function convertHeifToJpegNode(
 ): Promise<ConvertHeifResult> {
   const quality = opts.quality ?? DEFAULT_QUALITY;
   const maxInputBytes = opts.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES;
+  const maxDecodePixels = opts.maxDecodePixels ?? DEFAULT_MAX_DECODE_PIXELS;
   await assertWithinSizeBound(input, maxInputBytes);
 
   const buffer = typeof input === 'string' ? await fs.readFile(input) : input;
+  assertDeclaredPixelsWithinBound(buffer, maxDecodePixels);
   const { default: decode } = await import('heic-decode');
   const { width, height, data } = await decode({ buffer });
-  const icc = extractIccFromHeif(buffer); // null for nclx-only files
+  // null for nclx-only files; a crafted colr box larger than what fits in
+  // 255 APP2 chunks is malformed by definition (real profiles are KBs), so
+  // degrade to "no ICC" instead of letting the chunk counter overflow.
+  const icc = extractIccFromHeif(buffer);
+  const embeddableIcc = icc !== null && icc.length <= MAX_EMBEDDABLE_ICC_BYTES ? icc : null;
+  const exif = extractExifFromHeif(buffer);
 
   const jpegBuffer = await sharp(Buffer.from(data.buffer, data.byteOffset, data.byteLength), {
     raw: { width, height, channels: 4 },
@@ -217,8 +255,52 @@ export async function convertHeifToJpegNode(
     .jpeg({ quality })
     .toBuffer();
 
-  const outBuffer = icc ? embedIccProfileInJpeg(jpegBuffer, icc) : jpegBuffer;
-  return { buffer: outBuffer, width, height, iccApplied: icc !== null };
+  let outBuffer: Buffer = jpegBuffer;
+  if (embeddableIcc) outBuffer = embedIccProfileInJpeg(outBuffer, embeddableIcc);
+  if (exif) outBuffer = embedExifInJpeg(outBuffer, exif);
+  return {
+    buffer: outBuffer,
+    width,
+    height,
+    iccApplied: embeddableIcc !== null,
+    converter: 'node',
+  };
+}
+
+/**
+ * Reject a HEIF whose container declares more pixels than `maxPixels`
+ * (via any `ispe` image-spatial-extents property) before it reaches the
+ * WASM decoder. Parsing failures on malformed layouts are ignored — the
+ * decoder itself then rejects the file — so this only ever *adds* a
+ * rejection, never blocks a decodable file.
+ */
+function assertDeclaredPixelsWithinBound(b: Buffer, maxPixels: number): void {
+  let declared: { width: number; height: number } | null = null;
+  try {
+    const meta = findBox(b, 0, b.length, 'meta');
+    if (!meta) return;
+    const iprp = findBox(b, meta.bodyStart + 4, meta.bodyEnd, 'iprp');
+    if (!iprp) return;
+    const ipco = findBox(b, iprp.bodyStart, iprp.bodyEnd, 'ipco');
+    if (!ipco) return;
+    for (const prop of walkBoxes(b, ipco.bodyStart, ipco.bodyEnd)) {
+      if (prop.type !== 'ispe' || prop.bodyEnd - prop.bodyStart < 12) continue;
+      const width = b.readUInt32BE(prop.bodyStart + 4); // ispe FullBox: version+flags, then width, height
+      const height = b.readUInt32BE(prop.bodyStart + 8);
+      if (width * height > maxPixels) {
+        declared = { width, height };
+        break;
+      }
+    }
+  } catch {
+    return;
+  }
+  if (declared) {
+    throw new Error(
+      `HEIF declares an image of ${declared.width}x${declared.height} pixels, ` +
+        `exceeding the ${maxPixels}-pixel decode limit (maxDecodePixels)`,
+    );
+  }
 }
 
 const ICC_APP2_IDENTIFIER = Buffer.from('ICC_PROFILE\0', 'latin1');
@@ -227,6 +309,10 @@ const ICC_APP2_IDENTIFIER = Buffer.from('ICC_PROFILE\0', 'latin1');
 // field, identifier, sequence number, and marker count to get the max ICC
 // payload per chunk.
 const MAX_ICC_CHUNK_BYTES = 0xffff - 2 - ICC_APP2_IDENTIFIER.length - 1 - 1;
+// The chunk-count byte in each APP2 segment is a uint8, so at most 255
+// chunks can ever be described. Anything larger cannot be represented in
+// the ICC-in-JPEG convention at all.
+const MAX_EMBEDDABLE_ICC_BYTES = 255 * MAX_ICC_CHUNK_BYTES;
 
 /**
  * Embed an ICC profile into a JPEG buffer as APP2 marker segment(s),
@@ -256,6 +342,194 @@ function embedIccProfileInJpeg(jpeg: Buffer, icc: Buffer): Buffer {
   }
 
   return Buffer.concat([jpeg.subarray(0, 2), ...segments, jpeg.subarray(2)]);
+}
+
+const EXIF_APP1_IDENTIFIER = Buffer.from('Exif\0\0', 'latin1');
+
+/**
+ * Splice a TIFF-format EXIF block into a JPEG buffer as an APP1 marker
+ * segment directly after SOI (so it precedes any APP2 ICC segments, per
+ * the usual marker order). Returns the JPEG unchanged when the block
+ * doesn't fit in a single APP1 segment — EXIF has no multi-segment
+ * chunking convention, so an oversized block simply can't be carried.
+ */
+function embedExifInJpeg(jpeg: Buffer, tiff: Buffer): Buffer {
+  if (jpeg.length < 2 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+    throw new Error('Expected a JPEG buffer starting with the SOI marker');
+  }
+  const segmentLength = 2 + EXIF_APP1_IDENTIFIER.length + tiff.length;
+  if (segmentLength > 0xffff) return jpeg;
+
+  const header = Buffer.alloc(4 + EXIF_APP1_IDENTIFIER.length);
+  header.writeUInt8(0xff, 0);
+  header.writeUInt8(0xe1, 1);
+  header.writeUInt16BE(segmentLength, 2);
+  EXIF_APP1_IDENTIFIER.copy(header, 4);
+  return Buffer.concat([jpeg.subarray(0, 2), header, tiff, jpeg.subarray(2)]);
+}
+
+/**
+ * Extract the EXIF metadata of a HEIF file as a TIFF-format block (the
+ * payload of a JPEG APP1 `Exif\0\0` segment), by finding the `Exif` item
+ * in meta/iinf and resolving its bytes through meta/iloc.
+ *
+ * The EXIF Orientation tag (IFD0 0x0112) in the returned block is
+ * neutralised to 1: the WASM decoder already applies the container's
+ * irot/imir transforms to the pixels, so carrying the source orientation
+ * forward would double-rotate in EXIF-aware viewers.
+ *
+ * Returns null when the file has no EXIF item or on any
+ * malformed/truncated box layout — same degrade-gracefully contract as
+ * {@link extractIccFromHeif}.
+ */
+export function extractExifFromHeif(b: Buffer): Buffer | null {
+  try {
+    const meta = findBox(b, 0, b.length, 'meta');
+    if (!meta) return null;
+    const metaBody = meta.bodyStart + 4; // meta is a FullBox: skip version+flags
+
+    const exifItemId = findExifItemId(b, metaBody, meta.bodyEnd);
+    if (exifItemId === null) return null;
+    const loc = findItemLocation(b, metaBody, meta.bodyEnd, exifItemId);
+    // The ExifDataBlock needs at least the 4-byte tiff-header offset plus
+    // a TIFF header; anything the iloc points at out of bounds is malformed.
+    if (!loc || loc.length < 12 || loc.offset + loc.length > b.length) return null;
+
+    const block = b.subarray(loc.offset, loc.offset + loc.length);
+    // ExifDataBlock (ISO 23008-12): uint32 offset from the start of the
+    // payload (i.e. after this field) to the TIFF header, then the payload.
+    const tiffStart = 4 + block.readUInt32BE(0);
+    if (tiffStart >= block.length - 8) return null;
+    const byteOrder = block.toString('latin1', tiffStart, tiffStart + 2);
+    if (byteOrder !== 'II' && byteOrder !== 'MM') return null;
+    return neutralizeTiffOrientation(block.subarray(tiffStart));
+  } catch {
+    return null;
+  }
+}
+
+/** Find the item id declared with item_type 'Exif' in meta/iinf, or null. */
+function findExifItemId(b: Buffer, metaBody: number, metaEnd: number): number | null {
+  const iinf = findBox(b, metaBody, metaEnd, 'iinf');
+  if (!iinf) return null;
+  const iinfVersion = b.readUInt8(iinf.bodyStart);
+  const entriesStart = iinf.bodyStart + 4 + (iinfVersion === 0 ? 2 : 4); // skip entry_count
+  for (const infe of walkBoxes(b, entriesStart, iinf.bodyEnd)) {
+    if (infe.type !== 'infe') continue;
+    const infeVersion = b.readUInt8(infe.bodyStart);
+    if (infeVersion < 2) continue; // item_type only exists from infe version 2
+    const idSize = infeVersion === 2 ? 2 : 4;
+    const itemId =
+      infeVersion === 2 ? b.readUInt16BE(infe.bodyStart + 4) : b.readUInt32BE(infe.bodyStart + 4);
+    const typeStart = infe.bodyStart + 4 + idSize + 2; // skip item_protection_index
+    if (b.toString('latin1', typeStart, typeStart + 4) === 'Exif') return itemId;
+  }
+  return null;
+}
+
+/**
+ * Resolve an item's byte range in the file via meta/iloc. Returns null
+ * for items stored with a non-zero construction method (idat/item
+ * offsets), an external data reference, or spread over multiple extents
+ * — none of which occur for the single-extent file-offset EXIF items
+ * real encoders write.
+ */
+function findItemLocation(
+  b: Buffer,
+  metaBody: number,
+  metaEnd: number,
+  targetItemId: number,
+): { offset: number; length: number } | null {
+  const iloc = findBox(b, metaBody, metaEnd, 'iloc');
+  if (!iloc) return null;
+  const version = b.readUInt8(iloc.bodyStart);
+  let p = iloc.bodyStart + 4;
+  const sizeFields = b.readUInt16BE(p);
+  p += 2;
+  const offsetSize = (sizeFields >> 12) & 0xf;
+  const lengthSize = (sizeFields >> 8) & 0xf;
+  const baseOffsetSize = (sizeFields >> 4) & 0xf;
+  const indexSize = version >= 1 ? sizeFields & 0xf : 0;
+
+  const readSized = (size: number): number => {
+    let value: number;
+    if (size === 0) value = 0;
+    else if (size === 8) value = Number(b.readBigUInt64BE(p));
+    else value = b.readUIntBE(p, size);
+    p += size;
+    return value;
+  };
+
+  let itemCount: number;
+  if (version < 2) {
+    itemCount = b.readUInt16BE(p);
+    p += 2;
+  } else {
+    itemCount = b.readUInt32BE(p);
+    p += 4;
+  }
+
+  for (let i = 0; i < itemCount; i++) {
+    let itemId: number;
+    if (version < 2) {
+      itemId = b.readUInt16BE(p);
+      p += 2;
+    } else {
+      itemId = b.readUInt32BE(p);
+      p += 4;
+    }
+    let constructionMethod = 0;
+    if (version >= 1) {
+      constructionMethod = b.readUInt16BE(p) & 0xf;
+      p += 2;
+    }
+    const dataReferenceIndex = b.readUInt16BE(p);
+    p += 2;
+    const baseOffset = readSized(baseOffsetSize);
+    const extentCount = b.readUInt16BE(p);
+    p += 2;
+    let firstExtent: { offset: number; length: number } | null = null;
+    for (let j = 0; j < extentCount; j++) {
+      if (indexSize > 0) readSized(indexSize);
+      const extentOffset = readSized(offsetSize);
+      const extentLength = readSized(lengthSize);
+      if (j === 0) firstExtent = { offset: baseOffset + extentOffset, length: extentLength };
+    }
+    if (itemId === targetItemId) {
+      if (constructionMethod !== 0 || dataReferenceIndex !== 0 || extentCount !== 1) return null;
+      return firstExtent;
+    }
+  }
+  return null;
+}
+
+/**
+ * Return a copy of a TIFF-format EXIF block with the IFD0 Orientation
+ * tag (0x0112), if present, set to 1 ("top-left, no rotation"). On any
+ * parse failure the unmodified copy is returned.
+ */
+function neutralizeTiffOrientation(tiff: Buffer): Buffer {
+  const out = Buffer.from(tiff);
+  try {
+    const littleEndian = out.toString('latin1', 0, 2) === 'II';
+    const readUInt16 = (o: number) => (littleEndian ? out.readUInt16LE(o) : out.readUInt16BE(o));
+    const readUInt32 = (o: number) => (littleEndian ? out.readUInt32LE(o) : out.readUInt32BE(o));
+    const ifd0 = readUInt32(4);
+    const entryCount = readUInt16(ifd0);
+    for (let i = 0; i < entryCount; i++) {
+      const entry = ifd0 + 2 + i * 12;
+      if (readUInt16(entry) === 0x0112) {
+        // value slot of a SHORT-type entry: 8 bytes into the 12-byte entry
+        if (littleEndian) out.writeUInt16LE(1, entry + 8);
+        else out.writeUInt16BE(1, entry + 8);
+        break;
+      }
+    }
+  } catch {
+    // leave the copy unmodified; a partially unparseable block is still
+    // better carried forward than dropped
+  }
+  return out;
 }
 
 // ---- ISOBMFF box parser --------------------------------------------------
