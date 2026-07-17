@@ -6,6 +6,9 @@ export {
   prepareImageForUpload,
   HEIC_DECODE_FAILED_MESSAGE,
   ORIENTATION_BAKE_FAILED_MESSAGE_PREFIX,
+  MISSING_EXIFR_MESSAGE,
+  MISSING_HEIC2ANY_MESSAGE,
+  DEFAULT_MAX_CANVAS_AREA,
   type PrepareImageForUploadOptions,
   type PreparedImage,
 } from './prepare-upload.js';
