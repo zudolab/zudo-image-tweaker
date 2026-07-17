@@ -1,0 +1,125 @@
+---
+title: calibrate
+description: Background-color calibration — sample a background, derive a target color across references, and normalize new images toward it.
+sidebar_position: 9
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/calibrate` normalizes background color drift
+across a batch of photos shot under inconsistent lighting or white balance.
+Correction is selective: only pixels close in hue to the *sampled*
+background — and saturated enough to carry that hue reliably — move toward
+the target; neutrals, grays, and dark pixels are left untouched.
+
+## Exports
+
+```ts
+function sampleBackgroundColor(
+  input: string | Buffer,
+  opts?: SampleBackgroundColorOptions,
+): Promise<RgbColor>;
+function calibrateTargetFromSamples(
+  inputs: Array<string | Buffer>,
+  opts?: SampleBackgroundColorOptions,
+): Promise<RgbColor>;
+function normalizeBackgroundColor(
+  input: string | Buffer,
+  opts: NormalizeBackgroundColorOptions,
+): Promise<NormalizeBackgroundColorResult>;
+
+interface RgbColor {
+  r: number;
+  g: number;
+  b: number;
+}
+```
+
+## Sample → calibrate → normalize workflow
+
+1. **`sampleBackgroundColor(image)`** — averages four square corner patches
+   (with a small margin off the exact edge) into a single `RgbColor`
+   reading of that image's own background.
+2. **`calibrateTargetFromSamples(images)`** — calls `sampleBackgroundColor`
+   on every reference image and averages the results into one target
+   `RgbColor`. Run this once against a representative batch to derive the
+   color every other photo should match.
+3. **`normalizeBackgroundColor(image, { target })`** — re-samples the given
+   image's current background, derives a per-channel scale factor from
+   `target / current` (clamped by `channelClamp`), and blends each pixel
+   toward its scaled value in proportion to a correction weight: a
+   saturation-gate ramp times a circular hue-distance falloff around the
+   *sampled* background hue.
+
+## Options
+
+### `sampleBackgroundColor` / `calibrateTargetFromSamples`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `patchSize` | `number` | `50` | Size (px) of each square corner patch sampled. |
+
+### `normalizeBackgroundColor`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `target` | `RgbColor` | *required* | Color to move the sampled background toward. |
+| `patchSize` | `number` | `50` | Size (px) of each corner patch used to sample the current background. |
+| `hueRadiusDeg` | `number` | `60` | Hue-distance falloff radius, in degrees, around the sampled background hue. |
+| `saturationGate` | `{ from: number; to: number }` | `{ from: 0.08, to: 0.25 }` | Saturation ramp (0-1) gating which pixels are eligible for correction: `0` weight below `from`, full weight at and above `to`. |
+| `channelClamp` | `[number, number]` | `[0.5, 2.0]` | Per-channel scale-factor clamp applied to each `target`/`current` ratio. |
+| `format` | `'jpeg' \| 'png' \| 'webp' \| 'tiff'` | Inferred from `input`'s extension when it's a path; `jpeg` for `Buffer` input | Output encoding. |
+
+`NormalizeBackgroundColorResult`: `{ buffer, applied: { scaleR, scaleG, scaleB } }`.
+
+## Example
+
+```ts
+import {
+  calibrateTargetFromSamples,
+  normalizeBackgroundColor,
+} from '@takazudo/zudo-image-tweaker/calibrate';
+
+const target = await calibrateTargetFromSamples(['./ref-1.jpg', './ref-2.jpg', './ref-3.jpg']);
+const { buffer, applied } = await normalizeBackgroundColor('./new-photo.jpg', { target });
+
+console.log(`scale r${applied.scaleR} g${applied.scaleG} b${applied.scaleB}, ${buffer.length} bytes`);
+```
+
+## Caveats
+
+:::danger[HEIC/HEIF: macOS sips only, no Node-native fallback]
+Unlike `/heif`, this module carries **no Node-native HEIC decoder** — macOS
+`sips` (feature-detected via `execFile`, never a shell string) is its
+*only* HEIC/HEIF decode path. On any platform where `sips` is unavailable
+(Linux, Windows), `sampleBackgroundColor` and `normalizeBackgroundColor`
+throw a descriptive error for `.heic`/`.heif` **string path** input,
+instructing the caller to pre-convert via the sibling
+[`/heif`](./heif.mdx) module first — which does carry a Node-native
+fallback. `Buffer` input bypasses this check entirely; only a string path
+is inspected for a `.heic`/`.heif` extension. See
+[External Binaries](../guides/external-binaries.mdx) for the full
+`sips` feature-detection story.
+:::
+
+- **EXIF orientation is applied before any pixel is read or written** (via
+  sharp's `.rotate()` with no arguments) — a corner patch is sampled from
+  the image's upright, displayed orientation, not its as-stored one.
+- **An achromatic sampled background gets zero correction weight for every
+  pixel.** When the sampled background's own saturation falls below
+  `saturationGate.from`, there's no coherent hue to match against — without
+  this gate, an achromatic reference would report a degenerate hue of `0`
+  (red), causing unrelated saturated red content elsewhere in the image to
+  be "corrected" instead.
+- **Very dark pixels are always left untouched** — any pixel whose
+  brightest channel is below `30` is treated as too dark to carry reliable
+  hue information, regardless of `saturationGate`.
+- **Alpha is never touched by the correction itself** — only the R/G/B
+  channels are blended toward their scaled values; the raw alpha bytes pass
+  through the pixel loop unchanged. Whether the *output* actually keeps
+  transparency still depends on `format`: JPEG and TIFF encoding drop alpha
+  entirely, so an alpha-bearing source normalized with `format: 'jpeg'` (or
+  no `format` on a `Buffer`, which defaults to `jpeg`) ends up opaque. Use
+  `format: 'png'` (or `'webp'`) to keep transparency in the result.
+- **`format` is only inferred from a path's extension** — `Buffer` input
+  always defaults to `jpeg` unless `format` is passed explicitly.
