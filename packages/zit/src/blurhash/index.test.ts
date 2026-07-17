@@ -148,6 +148,31 @@ describe('batchBlurhashToDataUri', () => {
     }
   });
 
+  it('honours the size option, matching single-decode output (parity)', async () => {
+    const image = await syntheticImage();
+    const hash = await encodeImageToBlurhash(image);
+
+    const [single, batch] = await Promise.all([
+      blurhashToDataUri(hash, { size: 8 }),
+      batchBlurhashToDataUri([hash, hash], { size: 8 }),
+    ]);
+
+    expect(batch).toEqual([single, single]);
+    const metadata = await sharp(dataUriToPngBuffer(batch[0])).metadata();
+    expect(metadata.width).toBe(8);
+    expect(metadata.height).toBe(8);
+  });
+
+  it('defaults to the 16px decode size when size is omitted', async () => {
+    const image = await syntheticImage();
+    const hash = await encodeImageToBlurhash(image);
+
+    const [dataUri] = await batchBlurhashToDataUri([hash]);
+    const metadata = await sharp(dataUriToPngBuffer(dataUri)).metadata();
+    expect(metadata.width).toBe(16);
+    expect(metadata.height).toBe(16);
+  });
+
   it('returns an empty array for an empty input', async () => {
     expect(await batchBlurhashToDataUri([])).toEqual([]);
   });
