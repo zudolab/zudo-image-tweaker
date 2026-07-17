@@ -30,6 +30,11 @@ export default defineConfig(
         categoryMatch: "getting-started",
       },
       {
+        label: "Guides",
+        path: "/docs/guides",
+        categoryMatch: "guides",
+      },
+      {
         label: "Claude",
         path: "/docs/claude",
         categoryMatch: "claude",

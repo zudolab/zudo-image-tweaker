@@ -1,0 +1,41 @@
+---
+title: Security & Heavy Dependencies
+description: The heic-decode trusted-input warning and the ONNX model download behind /product-photo.
+sidebar_position: 3
+---
+
+## `/heif`'s Node/WASM decoder: trusted input only
+
+`/heif`'s Node-native fallback decoder (`heic-decode`, which bundles `libheif-js` 1.19.8) predates
+the `libheif` 1.22.0 fixes for **CVE-2026-32740** (heap overflow) and **CVE-2026-32739**
+(infinite-loop DoS). As of this writing, no `heic-decode` release bundling a fixed `libheif-js`
+exists yet.
+
+This fallback path runs whenever `sips` isn't taken (see [External Binaries](./external-binaries.mdx))
+— which is always, on any non-macOS platform. **Only decode HEIC/HEIF files from sources you
+trust.** The decoder runs inside a WASM sandbox, and `convertHeifToJpeg`'s `maxInputBytes` option
+(default 256 MiB) rejects oversized inputs before they ever reach the decoder — but both are
+defense-in-depth, not a substitute for trusting the source. This mirrors the warning in the
+package's own [README](https://github.com/zudolab/zudo-image-tweaker/blob/main/packages/zit/README.md#security-notes);
+bump `heic-decode` once its bundled `libheif-js` reaches 1.22.0 or later.
+
+## `/product-photo`'s background-removal model: ~80MB, opt-in
+
+`@imgly/background-removal-node` is an **optional peer dependency** — install it only if you call
+`/product-photo`'s background-removal function. It's dynamic-imported lazily, so a consumer who
+never calls that function never pays for it, even if the package happens to be installed.
+
+The first time it actually runs, it downloads an **ONNX machine-learning model (~80MB)** to perform
+the segmentation. Plan for that download in constrained, offline, or cold-start-sensitive
+environments (serverless functions, CI sandboxes without network egress) — either warm the model
+cache ahead of time or avoid calling `/product-photo` in those contexts.
+
+## The other optional peers
+
+`exifr` and `heic2any` are both dynamic-imported by `/browser` only — its client-side upload-prep
+pipeline uses `heic2any` to transcode HEIC/HEIF blobs and `exifr` to read EXIF dates from a
+`File`/`Blob` in the browser, where `sharp` isn't available. (`/exif` itself doesn't import `exifr`
+— it reads EXIF straight out of the buffer `sharp`'s own metadata already gives it.) Both follow the
+same `peerDependencies` + `peerDependenciesMeta.<name>.optional: true` pattern as
+`@imgly/background-removal-node`: install them only if you use `/browser` — see
+[Installation](../getting-started/installation.mdx).
