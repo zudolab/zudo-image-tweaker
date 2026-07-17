@@ -56,6 +56,11 @@ const execFileAsync = promisify(execFile);
 
 const DEFAULT_QUALITY = 90;
 const DEFAULT_MAX_INPUT_BYTES = 256 * 1024 * 1024;
+// Same default as the shared variants runner (src/variants/run.ts): long
+// enough for a real conversion, short enough that a hung `sips` process
+// can't stall a caller forever — it always has the Node/WASM fallback to
+// fall through to (issue #67).
+const DEFAULT_SIPS_TIMEOUT_MS = 60_000;
 // sharp's default limitInputPixels (0x3FFF * 0x3FFF). The Node path checks
 // the container's declared dimensions against this BEFORE the WASM decode,
 // because a tiny crafted HEIC declaring huge dimensions would otherwise
@@ -74,6 +79,11 @@ export interface ConvertHeifToJpegOptions {
    * limitInputPixels, 0x3FFF x 0x3FFF)
    */
   maxDecodePixels?: number;
+  /**
+   * `sips` path only: kill the `sips` subprocess if it hasn't exited after
+   * this many ms, falling back to the Node/WASM path. @default 60000
+   */
+  sipsTimeoutMs?: number;
 }
 
 export interface ConvertHeifResult {
@@ -126,11 +136,12 @@ export async function convertHeifToJpeg(
   const quality = opts.quality ?? DEFAULT_QUALITY;
   const maxInputBytes = opts.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES;
   const maxDecodePixels = opts.maxDecodePixels ?? DEFAULT_MAX_DECODE_PIXELS;
+  const sipsTimeoutMs = opts.sipsTimeoutMs ?? DEFAULT_SIPS_TIMEOUT_MS;
   await assertWithinSizeBound(input, maxInputBytes);
 
   let sipsError: Error | null = null;
   if (typeof input === 'string') {
-    const sipsOutcome = await tryConvertWithSips(input, quality);
+    const sipsOutcome = await tryConvertWithSips(input, quality, sipsTimeoutMs);
     if (sipsOutcome.result) return sipsOutcome.result;
     sipsError = sipsOutcome.error;
   }
@@ -164,22 +175,37 @@ interface SipsOutcome {
  * file) so the caller always falls back to the Node path; `error` carries
  * the non-ENOENT failure for diagnostics if the Node path also fails.
  */
-async function tryConvertWithSips(inputPath: string, quality: number): Promise<SipsOutcome> {
+async function tryConvertWithSips(
+  inputPath: string,
+  quality: number,
+  timeoutMs: number,
+): Promise<SipsOutcome> {
   // randomUUID (not just pid+timestamp) avoids output-path collisions
   // between concurrent conversions in the same process.
   const outPath = path.join(os.tmpdir(), `heif-sips-${process.pid}-${randomUUID()}.jpg`);
+  // Resolved before it reaches `sips`' argv so a bare leading-dash relative
+  // filename (e.g. `-rf.heic`) can never be parsed as an option flag
+  // (issue #66).
+  const resolvedInputPath = path.resolve(inputPath);
   try {
-    await execFileAsync('sips', [
-      '-s',
-      'format',
-      'jpeg',
-      '-s',
-      'formatOptions',
-      String(quality),
-      inputPath,
-      '--out',
-      outPath,
-    ]);
+    await execFileAsync(
+      'sips',
+      [
+        '-s',
+        'format',
+        'jpeg',
+        '-s',
+        'formatOptions',
+        String(quality),
+        resolvedInputPath,
+        '--out',
+        outPath,
+      ],
+      // SIGKILL (not SIGTERM) so a `sips` process that ignores or handles
+      // SIGTERM can't defeat the timeout (see variants/run.ts's RunOptions
+      // doc for the same reasoning).
+      { timeout: timeoutMs, killSignal: 'SIGKILL' },
+    );
   } catch (error) {
     // A non-zero `sips` exit can still leave a partial `outPath` on disk
     // (e.g. the documented gain-map failure). This early return skips the

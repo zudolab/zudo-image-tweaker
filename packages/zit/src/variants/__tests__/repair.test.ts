@@ -8,6 +8,7 @@ vi.mock('../run.js', () => ({
   run: vi.fn(),
   isMissingBinaryError: (error: unknown) =>
     (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+  resolveBinaryPath: (inputPath: string) => path.resolve(inputPath),
 }));
 
 import { resetFeatureDetectionCache } from '../feature-detect.js';
@@ -72,6 +73,15 @@ describe('repairCorruptedImage', () => {
     const magickCall = mockRun.mock.calls.find((c) => c[0] === 'magick' && !c[1].includes('-version'));
     expect(Array.isArray(magickCall?.[1])).toBe(true);
     expect(magickCall?.[1][0]).toBe(inputPath);
+  });
+
+  it('resolves a leading-dash relative filename before handing it to the repair tool (issue #66)', async () => {
+    mockRun.mockImplementation(toolPresent('magick'));
+    await repairCorruptedImage('-suspicious.jpg');
+    const magickCall = mockRun.mock.calls.find((c) => c[0] === 'magick' && !c[1].includes('-version'));
+    const resolvedInput = magickCall?.[1][0];
+    expect(resolvedInput).not.toMatch(/^-/);
+    expect(path.isAbsolute(resolvedInput!)).toBe(true);
   });
 
   it('falls back to ffmpeg on a plain-Linux host without magick', async () => {

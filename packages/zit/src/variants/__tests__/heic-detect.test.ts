@@ -1,9 +1,11 @@
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../run.js', () => ({
   run: vi.fn(),
   isMissingBinaryError: (error: unknown) =>
     (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+  resolveBinaryPath: (inputPath: string) => path.resolve(inputPath),
 }));
 
 import { resetFeatureDetectionCache } from '../feature-detect.js';
@@ -81,6 +83,15 @@ describe('isHeicSource', () => {
   it('still detects a real HEIF payload under a directory named HEIC-converted/', async () => {
     fileSays('image/heif');
     expect(await isHeicSource('/photos/HEIC-converted/a.jpg')).toBe(true);
+  });
+
+  it('resolves a leading-dash relative filename before handing it to `file` (issue #66)', async () => {
+    fileSays('image/heif');
+    await isHeicSource('-suspicious.jpg');
+    const call = mockRun.mock.calls.find((c) => !c[1].includes('--version'));
+    const inputArg = call?.[1][call[1].length - 1];
+    expect(inputArg).not.toMatch(/^-/);
+    expect(path.isAbsolute(inputArg!)).toBe(true);
   });
 });
 

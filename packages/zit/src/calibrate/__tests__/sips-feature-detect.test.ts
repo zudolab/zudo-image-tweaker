@@ -20,11 +20,13 @@ describe('HEIC/HEIF sips feature detection', () => {
   });
 
   it('throws a descriptive, documented capability-loss error when sips is unavailable (ENOENT)', async () => {
-    execFileMock.mockImplementation((_file: string, _args: string[], callback: (err: unknown) => void) => {
-      const err = new Error('spawn sips ENOENT') as NodeJS.ErrnoException;
-      err.code = 'ENOENT';
-      callback(err);
-    });
+    execFileMock.mockImplementation(
+      (_file: string, _args: string[], _options: unknown, callback: (err: unknown) => void) => {
+        const err = new Error('spawn sips ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        callback(err);
+      },
+    );
 
     const { sampleBackgroundColor } = await import('../index.js');
 
@@ -45,14 +47,17 @@ describe('HEIC/HEIF sips feature detection', () => {
         '--out',
         expect.any(String),
       ],
+      expect.objectContaining({ timeout: expect.any(Number) }),
       expect.any(Function),
     );
   });
 
   it('wraps a non-ENOENT sips failure with actionable gain-map/pre-convert guidance (issue #34)', async () => {
-    execFileMock.mockImplementation((_file: string, _args: string[], callback: (err: unknown) => void) => {
-      callback(new Error('sips: corrupt file'));
-    });
+    execFileMock.mockImplementation(
+      (_file: string, _args: string[], _options: unknown, callback: (err: unknown) => void) => {
+        callback(new Error('sips: corrupt file'));
+      },
+    );
 
     const { sampleBackgroundColor } = await import('../index.js');
 
@@ -67,7 +72,7 @@ describe('HEIC/HEIF sips feature detection', () => {
   it('cleans up the partial temp JPEG when sips fails after writing one (issue #34)', async () => {
     let writtenTempPath: string | undefined;
     execFileMock.mockImplementation(
-      (_file: string, args: string[], callback: (err: unknown) => void) => {
+      (_file: string, args: string[], _options: unknown, callback: (err: unknown) => void) => {
         const outIndex = args.indexOf('--out');
         writtenTempPath = args[outIndex + 1];
         // Mirrors a real partial-output sips failure (e.g. the documented
@@ -86,11 +91,13 @@ describe('HEIC/HEIF sips feature detection', () => {
   });
 
   it('routes .heif input through the same sips feature-detect path as .heic', async () => {
-    execFileMock.mockImplementation((_file: string, _args: string[], callback: (err: unknown) => void) => {
-      const err = new Error('spawn sips ENOENT') as NodeJS.ErrnoException;
-      err.code = 'ENOENT';
-      callback(err);
-    });
+    execFileMock.mockImplementation(
+      (_file: string, _args: string[], _options: unknown, callback: (err: unknown) => void) => {
+        const err = new Error('spawn sips ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        callback(err);
+      },
+    );
 
     const { normalizeBackgroundColor } = await import('../index.js');
 
@@ -106,7 +113,7 @@ describe('HEIC/HEIF sips feature detection', () => {
       .toBuffer();
 
     execFileMock.mockImplementation(
-      (_file: string, args: string[], callback: (err: unknown) => void) => {
+      (_file: string, args: string[], _options: unknown, callback: (err: unknown) => void) => {
         const outIndex = args.indexOf('--out');
         writeFileSync(args[outIndex + 1], fixtureJpeg);
         callback(null);

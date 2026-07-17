@@ -61,6 +61,13 @@ import sharp from 'sharp';
 
 const execFileAsync = promisify(execFile);
 
+// Same default as the shared variants runner (src/variants/run.ts): long
+// enough for a real conversion, short enough that a hung `sips` process
+// can't stall a caller forever (issue #67). Unlike /heif this module has
+// no Node-native HEIC fallback, so a timeout still surfaces as an error —
+// the same contract a non-timeout `sips` failure already has.
+const DEFAULT_SIPS_TIMEOUT_MS = 60_000;
+
 const DEFAULT_PATCH_SIZE = 50;
 const PATCH_MARGIN = 5;
 const DEFAULT_HUE_RADIUS_DEG = 60;
@@ -86,6 +93,11 @@ export interface SaturationGate {
 export interface SampleBackgroundColorOptions {
   /** Size (px) of each square corner patch sampled. @default 50 */
   patchSize?: number;
+  /**
+   * HEIC/HEIF input only: kill the `sips` conversion subprocess if it
+   * hasn't exited after this many ms. @default 60000
+   */
+  sipsTimeoutMs?: number;
 }
 
 export interface NormalizeBackgroundColorOptions {
@@ -101,6 +113,11 @@ export interface NormalizeBackgroundColorOptions {
   channelClamp?: [number, number];
   /** Output encoding. Inferred from `input`'s extension when it's a path (default jpeg); defaults to jpeg for Buffer input. */
   format?: 'jpeg' | 'png' | 'webp' | 'tiff';
+  /**
+   * HEIC/HEIF input only: kill the `sips` conversion subprocess if it
+   * hasn't exited after this many ms. @default 60000
+   */
+  sipsTimeoutMs?: number;
 }
 
 export interface NormalizeBackgroundColorResult {
@@ -123,26 +140,37 @@ function isHeicPath(input: string): boolean {
  * capability-loss error; any other `sips` failure (e.g. a genuinely
  * corrupt file) is rethrown unchanged.
  */
-async function tryHeicToTempJpeg(heicPath: string): Promise<string | null> {
+async function tryHeicToTempJpeg(heicPath: string, timeoutMs: number): Promise<string | null> {
   const tempPath = path.join(
     os.tmpdir(),
     `zit-calibrate-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`,
   );
+  // Resolved before it reaches `sips`' argv so a bare leading-dash relative
+  // filename (e.g. `-rf.heic`) can never be parsed as an option flag
+  // (issue #66).
+  const resolvedHeicPath = path.resolve(heicPath);
   try {
     // Argument order matches the sibling /heif module (see heif/index.ts):
     // all `-s` options first, then the input file, then `--out` last — the
     // order documented in `man sips` (`sips [options] file... --out outfile`).
-    await execFileAsync('sips', [
-      '-s',
-      'format',
-      'jpeg',
-      '-s',
-      'formatOptions',
-      '95',
-      heicPath,
-      '--out',
-      tempPath,
-    ]);
+    await execFileAsync(
+      'sips',
+      [
+        '-s',
+        'format',
+        'jpeg',
+        '-s',
+        'formatOptions',
+        '95',
+        resolvedHeicPath,
+        '--out',
+        tempPath,
+      ],
+      // SIGKILL (not SIGTERM) so a `sips` process that ignores or handles
+      // SIGTERM can't defeat the timeout (see variants/run.ts's RunOptions
+      // doc for the same reasoning).
+      { timeout: timeoutMs, killSignal: 'SIGKILL' },
+    );
   } catch (error) {
     // A non-zero `sips` exit can still leave a partial `tempPath` on disk
     // (e.g. the gain-map failure documented below) — force-remove it here,
@@ -176,9 +204,12 @@ interface DecodeSource {
  * string paths are routed through `sips` first; every other input (any
  * Buffer, or a non-HEIC path) passes through unchanged.
  */
-async function resolveDecodeSource(input: string | Buffer): Promise<DecodeSource> {
+async function resolveDecodeSource(
+  input: string | Buffer,
+  sipsTimeoutMs: number,
+): Promise<DecodeSource> {
   if (typeof input === 'string' && isHeicPath(input)) {
-    const tempPath = await tryHeicToTempJpeg(input);
+    const tempPath = await tryHeicToTempJpeg(input, sipsTimeoutMs);
     if (!tempPath) {
       throw new Error(
         `HEIC/HEIF decoding requires macOS 'sips', which is unavailable on this platform. ` +
@@ -242,9 +273,10 @@ export async function sampleBackgroundColor(
   opts: SampleBackgroundColorOptions = {},
 ): Promise<RgbColor> {
   const patchSize = opts.patchSize ?? DEFAULT_PATCH_SIZE;
+  const sipsTimeoutMs = opts.sipsTimeoutMs ?? DEFAULT_SIPS_TIMEOUT_MS;
   const minDimension = patchSize + PATCH_MARGIN * 2;
 
-  const { sharpInput, cleanup } = await resolveDecodeSource(input);
+  const { sharpInput, cleanup } = await resolveDecodeSource(input, sipsTimeoutMs);
   try {
     const { width, height } = await orientedDimensions(sharpInput);
     if (!width || !height || width < minDimension || height < minDimension) {
@@ -477,6 +509,7 @@ export async function normalizeBackgroundColor(
     saturationGate = DEFAULT_SATURATION_GATE,
     channelClamp = DEFAULT_CHANNEL_CLAMP,
     format,
+    sipsTimeoutMs = DEFAULT_SIPS_TIMEOUT_MS,
   } = opts;
   // sampleBackgroundColor's sharp `.extract()` call rejects a non-positive
   // or fractional patchSize on its own; the in-memory sampler below has no
@@ -487,7 +520,7 @@ export async function normalizeBackgroundColor(
   }
   const minDimension = patchSize + PATCH_MARGIN * 2;
 
-  const { sharpInput, cleanup } = await resolveDecodeSource(input);
+  const { sharpInput, cleanup } = await resolveDecodeSource(input, sipsTimeoutMs);
   let iccTempPath: string | null = null;
   try {
     const { hasAlpha, icc } = await sharp(sharpInput).metadata();
