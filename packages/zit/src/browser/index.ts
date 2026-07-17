@@ -8,7 +8,7 @@ export {
   ORIENTATION_BAKE_FAILED_MESSAGE_PREFIX,
   type PrepareImageForUploadOptions,
   type PreparedImage,
-} from './prepare-upload';
+} from './prepare-upload.js';
 export {
   deriveGeometry,
   deriveOrientation,
@@ -16,5 +16,5 @@ export {
   type Dimensions,
   type DerivedGeometry,
   type Orientation,
-} from './orientation';
-export { needsOrientationBake } from './exif-orientation';
+} from './orientation.js';
+export { needsOrientationBake } from './exif-orientation.js';

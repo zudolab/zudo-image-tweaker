@@ -17,13 +17,12 @@ set -euo pipefail
 # This package has no `bin` — it is a library, not a CLI — so there is no
 # `--version`/CLI smoke test here (contrast with CLI-shaped sibling projects).
 #
-# Resolution-only, by design: the eleven module directories under src/ are
-# currently stub modules (`export {}`, no runtime behavior yet — see
-# https://github.com/zudolab/zudo-image-tweaker/issues/14 for the real
-# variants engine). This script only proves each subpath *resolves* through
-# the packed tarball's exports map; it intentionally does NOT assert on any
-# specific named export, since none exist yet. Once the engine wave lands,
-# a stronger behavioral check can be layered on top of this resolution gate.
+# Resolution-only, by design: this script only proves each subpath
+# *resolves* through the packed tarball's exports map from a real consumer
+# install; it intentionally does not assert on any specific named export or
+# runtime behavior — that's what each module's own test suite (`pnpm test`)
+# covers. Keeping this gate resolution-only (rather than duplicating
+# behavioral assertions here) keeps it cheap enough to run on every PR.
 #
 # Run locally from anywhere: `bash scripts/check-pack.sh` (paths below are
 # resolved relative to this script's own location, not the caller's cwd).

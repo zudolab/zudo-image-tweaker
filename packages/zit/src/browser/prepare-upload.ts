@@ -16,8 +16,8 @@
  * bundle unless the pipeline actually runs.
  */
 
-import { deriveOrientation, type Orientation } from './orientation';
-import { needsOrientationBake } from './exif-orientation';
+import { deriveOrientation, type Orientation } from './orientation.js';
+import { needsOrientationBake } from './exif-orientation.js';
 
 const HEIC_MIME = /^image\/(heic|heif)$/i;
 const HEIC_EXT = /\.(heic|heif)$/i;
