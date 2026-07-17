@@ -8,8 +8,8 @@ sidebar_position: 10
 
 `@takazudo/zudo-image-tweaker/composite` places a square overlay (a
 watermark, badge, or logo) in a corner of a base image, sized as a
-percentage of the base's width, plus a batch helper that composites every
-base against every overlay with bounded concurrency.
+percentage of the base's *shorter side*, plus a batch helper that composites
+every base against every overlay with bounded concurrency.
 
 ## Exports
 
@@ -34,7 +34,8 @@ ArrayBuffer | Uint8Array | Uint8ClampedArray`).
 
 - **`compositeOverlay`** — a single base/overlay composite. The overlay is
   always resized to a 1:1 square (`'cover'` fit) at `widthPercent` of the
-  base's width, then anchored to a corner with a `paddingPercent` gap.
+  base's shorter side (`min(width, height)`), then anchored to a corner with
+  a `paddingPercent` gap.
 - **`compositeBatch`** — runs `compositeOverlay` over the cartesian product
   of a `bases` list and an `overlays` list (every base × every overlay),
   processed with a bounded-concurrency worker pool.
@@ -45,8 +46,8 @@ ArrayBuffer | Uint8Array | Uint8ClampedArray`).
 
 | Name | Type | Default | Effect |
 |---|---|---|---|
-| `widthPercent` | `number` | *required* | Overlay width as a percentage (0-100) of the base image's width. The overlay is always forced to a 1:1 square at this size. |
-| `paddingPercent` | `number` | *required* | Gap from the base image's edges, as a percentage of the base's *width* — used for both the horizontal and vertical offset, even against a non-square base. |
+| `widthPercent` | `number` | *required* | Overlay width as a percentage (0-100) of the base image's *shorter side* (`min(width, height)`). The overlay is always forced to a 1:1 square at this size. |
+| `paddingPercent` | `number` | *required* | Gap from the base image's edges, as a percentage of the base's *shorter side* — used for both the horizontal and vertical offset, even against a non-square base. |
 | `position` | `CompositePosition` | `'bottom-right'` | Corner to anchor to. `'bottom-right'` is the only value that ships in v1. |
 
 `CompositeOverlayResult`: `{ buffer, width, height }`.
@@ -91,12 +92,15 @@ for (const { baseRef, overlayRef, result } of results) {
   (which involve a 90deg turn) need a manual width/height swap internally
   to match what `.rotate()` actually produces — `compositeOverlay` handles
   this for you.
-- **Padding is always derived from the base's width on both axes**, even
-  for a non-square base — a tall, narrow base gets the same
-  `paddingPercent`-of-width gap vertically as it does horizontally, not a
-  height-relative one.
+- **Overlay size and padding are both derived from the base's shorter side**
+  (`min(width, height)`) on both axes, even for a non-square base — this
+  keeps the badge from overflowing the base's narrow axis on a strongly
+  landscape or portrait image.
 - **A `widthPercent` that rounds to a non-positive pixel size throws**,
   rather than silently producing a 0px (or negative) overlay.
+- **An overlay/padding combination that doesn't fit within the base throws**
+  a descriptive error instead of producing a cryptic `sharp` composite
+  failure or a badge positioned outside the canvas.
 - **Only `'bottom-right'` ships in v1.** Passing any other `position` value
   throws at runtime (the implementation is an exhaustive switch, ready for
   more corners later).

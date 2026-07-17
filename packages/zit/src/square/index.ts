@@ -274,9 +274,17 @@ export async function insetOnSquare(
   return { buffer, width: side, height: side };
 }
 
+// A pixel this transparent or more is treated as background regardless of its
+// RGB value — independent of `threshold` and of the caller's chosen output
+// `background` fill, since neither has anything to do with what the source
+// pixel's hidden (multiplied-out) RGB happens to hold.
+const ALPHA_BACKGROUND_MAX = 10;
+
 /**
  * Compute the bounding box of the non-background region in a raw RGBA buffer.
- * A pixel is "background" when ALL of R,G,B are >= `threshold`.
+ * A pixel is "background" when it's near-fully transparent (alpha <=
+ * `ALPHA_BACKGROUND_MAX`), OR — for opaque-ish pixels — when ALL of R,G,B are
+ * >= `threshold`.
  */
 function contentBBox(
   data: Buffer,
@@ -295,7 +303,9 @@ function contentBBox(
       const r = data[i];
       const g = data[i + 1];
       const b = data[i + 2];
-      if (!(r >= threshold && g >= threshold && b >= threshold)) {
+      const a = channels >= 4 ? data[i + 3] : 255;
+      const isBackground = a <= ALPHA_BACKGROUND_MAX || (r >= threshold && g >= threshold && b >= threshold);
+      if (!isBackground) {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
         if (y < minY) minY = y;
@@ -342,19 +352,12 @@ export async function trimPadSquare(
   const { img, width, height } = await loadOriented(input);
 
   // Read raw pixels (on a clone so `img` stays a pristine pipeline) and locate
-  // the content bounding box. Flatten onto `background` FIRST: a transparent
-  // border otherwise carries whatever RGB its (irrelevant) hidden pixels
-  // happen to hold — often far from "near-white" — so it gets misread as
-  // content instead of background. Flattening makes a transparent pixel
-  // read exactly as the intended pad color, matching how the final square
-  // canvas actually renders it. The extracted content itself (below) is
-  // still pulled from the un-flattened `img`, so real alpha is preserved.
-  const { data, info } = await img
-    .clone()
-    .ensureAlpha()
-    .flatten({ background })
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+  // the content bounding box. contentBBox treats near-fully-transparent
+  // pixels as background directly (see ALPHA_BACKGROUND_MAX) — a transparent
+  // border otherwise carries whatever RGB its (irrelevant, multiplied-out)
+  // hidden pixels happen to hold, which is often far from "near-white" and
+  // would get misread as content.
+  const { data, info } = await img.clone().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const bbox = contentBBox(data, info.width, info.height, info.channels, threshold);
 
   // All-background input → emit a background-color square of the larger original side.
