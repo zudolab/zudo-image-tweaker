@@ -66,6 +66,7 @@ interface ResolvedConfig {
   fallbackBlurhash?: string;
   tagParser: TagParser;
   autoRepair: boolean;
+  backupCorrupted: boolean;
   bakeExifOrientation: boolean;
   stripMetadata: boolean;
   onMetadata?: ProcessOneConfig['onMetadata'];
@@ -85,6 +86,7 @@ function resolveConfig(config: ProcessOneConfig): ResolvedConfig {
     fallbackBlurhash: config.fallbackBlurhash,
     tagParser: config.tagParser ?? defaultTagParser,
     autoRepair: config.autoRepair ?? true,
+    backupCorrupted: config.backupCorrupted ?? false,
     bakeExifOrientation: config.bakeExifOrientation ?? false,
     stripMetadata: config.stripMetadata ?? false,
     onMetadata: config.onMetadata,
@@ -238,6 +240,7 @@ function applyFormat(pipeline: Sharp, format: string, quality: number): Sharp {
 async function probeWithRepair(
   input: string | Buffer,
   autoRepair: boolean,
+  backupCorrupted: boolean,
 ): Promise<{ metadata: Metadata; input: string | Buffer }> {
   try {
     return { metadata: await sharp(input).metadata(), input };
@@ -246,7 +249,7 @@ async function probeWithRepair(
     // input here is already a freshly decoded intermediate, so there's
     // nothing on disk to repair.
     if (autoRepair && typeof input === 'string' && isCorruptionError(error)) {
-      const repaired = await repairCorruptedImage(input);
+      const repaired = await repairCorruptedImage(input, { backupCorrupted });
       if (repaired) {
         return { metadata: await sharp(repaired).metadata(), input: repaired };
       }
@@ -468,7 +471,7 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
   // but pixel-truncated file; that corruption surfaces later in the decode.
   let metadata: Metadata;
   try {
-    const probed = await probeWithRepair(processInput, cfg.autoRepair);
+    const probed = await probeWithRepair(processInput, cfg.autoRepair, cfg.backupCorrupted);
     metadata = probed.metadata;
     processInput = probed.input;
   } catch (error) {
@@ -561,7 +564,7 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
       const cause = error instanceof VariantProcessingError ? error.cause : error;
       const repaired =
         cfg.autoRepair && typeof processInput === 'string' && isCorruptionError(cause)
-          ? await repairCorruptedImage(processInput)
+          ? await repairCorruptedImage(processInput, { backupCorrupted: cfg.backupCorrupted })
           : null;
       if (!repaired) {
         // Preserve the originating stage ('ogp' when OGP threw), defaulting

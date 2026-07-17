@@ -26,9 +26,12 @@ memoized for the lifetime of the process.
 **`magick` and `ffmpeg`** back `repairCorruptedImage`, invoked automatically (`autoRepair: true` by
 default — see [Configuration](./configuration.mdx)) when a decode error matches a known
 libvips/sharp corruption signature (premature end, bad Huffman, corrupt JPEG, libspng read error).
-`magick` is tried first, then `ffmpeg`, each only if feature-detected. **On plain Linux without
-ImageMagick or ffmpeg installed, repair is skipped**: the engine logs a `console.warn` and returns
-`null` rather than failing outright — a missing optional binary must never break a run on its own.
+`magick` is tried first — a strip/normalise pass, then a format-swap re-decode through the sibling
+raster format (jpg↔png) that recovers a bitstream the same-format pass can't — then `ffmpeg`, each
+only if feature-detected. **On plain Linux without ImageMagick or ffmpeg installed, repair is
+skipped**: the engine logs a `console.warn` and returns `null` rather than failing outright — a
+missing optional binary must never break a run on its own. Set `backupCorrupted: true` (in the
+`/variants` config) to copy each corrupt source to a sibling `<name>.corrupted.bak` before repair.
 If the source genuinely can't be repaired without one of these tools, the original decode error
 still propagates, since repair yielding nothing is not itself a failure signal.
 
