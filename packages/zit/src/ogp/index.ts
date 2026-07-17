@@ -204,6 +204,14 @@ export async function generateOgpImage(
   // Cap the default so the card never exceeds a caller-shrunk canvas — sharp
   // rejects a composite layer larger than its base image.
   const foregroundSize = opts.foregroundSize ?? Math.min(DEFAULT_FOREGROUND_SIZE, width, height);
+  const canvasLimit = Math.min(width, height);
+  if (foregroundSize > canvasLimit) {
+    throw new Error(
+      `foregroundSize (${foregroundSize}) exceeds the canvas limit of ${canvasLimit}px ` +
+        `(the smaller of width=${width} and height=${height}); the composite card ` +
+        'cannot be larger than the canvas it is centered on.',
+    );
+  }
   const cornerRadius = opts.cornerRadius ?? DEFAULT_CORNER_RADIUS;
   const blurSigma = opts.blurSigma ?? DEFAULT_BLUR_SIGMA;
   const desaturate = opts.desaturate ?? DEFAULT_DESATURATE;

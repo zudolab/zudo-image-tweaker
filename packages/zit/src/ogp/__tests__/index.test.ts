@@ -124,6 +124,114 @@ describe('generateOgpFromLandscape', () => {
   });
 });
 
+describe('generateOgpImage: foregroundSize validation', () => {
+  it('throws a descriptive error when foregroundSize exceeds the canvas limit', async () => {
+    const input = await createSolidImage(1000, 1000);
+
+    await expect(
+      generateOgpImage(input, { width: 600, height: 315, foregroundSize: 700 }),
+    ).rejects.toThrow(/foregroundSize \(700\).*exceeds.*315/i);
+  });
+
+  it('allows a foregroundSize equal to the canvas limit', async () => {
+    const input = await createSolidImage(1000, 1000);
+
+    const result = await generateOgpImage(input, { width: 600, height: 315, foregroundSize: 315 });
+    expect(result.width).toBe(600);
+    expect(result.height).toBe(315);
+  });
+});
+
+// Pixel-level assertions (issue #55): the tests above only check
+// dimensions/format, so a blank/broken five-layer composite would pass all
+// of them. These assert actual pixel colours with solid-color inputs to
+// confirm the layers are genuinely stacked. Pattern reference:
+// src/calibrate/__tests__/calibrate.test.ts (readRawRgb/pixelAt).
+describe('generateOgpImage: pixel-level composite assertions', () => {
+  const GREEN = { r: 20, g: 200, b: 40 };
+  const TOLERANCE = 4;
+
+  async function readRawRgb(buffer: Buffer): Promise<{ data: Buffer; width: number; height: number }> {
+    const { data, info } = await sharp(buffer).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    return { data, width: info.width, height: info.height };
+  }
+
+  function pixelAt(data: Buffer, width: number, x: number, y: number): { r: number; g: number; b: number } {
+    const idx = (y * width + x) * 3;
+    return { r: data[idx], g: data[idx + 1], b: data[idx + 2] };
+  }
+
+  function closeTo(actual: number, expected: number, tolerance: number): boolean {
+    return Math.abs(actual - expected) <= tolerance;
+  }
+
+  it('renders the card center close to the pure-green source, and the corner distinctly different', async () => {
+    const input = await createSolidImage(1000, 1000, GREEN);
+    const result = await generateOgpImage(input);
+    const { data, width, height } = await readRawRgb(result.buffer);
+
+    // Canvas center: inside the 600px card, cover-cropped from the solid
+    // source with no blur/desaturate applied — must render close to green.
+    const center = pixelAt(data, width, Math.floor(width / 2), Math.floor(height / 2));
+    expect(closeTo(center.r, GREEN.r, TOLERANCE)).toBe(true);
+    expect(closeTo(center.g, GREEN.g, TOLERANCE)).toBe(true);
+    expect(closeTo(center.b, GREEN.b, TOLERANCE)).toBe(true);
+
+    // Canvas corner: outside the card, on the blurred+desaturated+gradient
+    // background. Desaturation alone pulls green toward gray, so the
+    // rendered value must differ from the raw source green by more than
+    // the tolerance used for the card-center match.
+    const corner = pixelAt(data, width, 2, 2);
+    const cornerMatchesRawGreen =
+      closeTo(corner.r, GREEN.r, TOLERANCE) &&
+      closeTo(corner.g, GREEN.g, TOLERANCE) &&
+      closeTo(corner.b, GREEN.b, TOLERANCE);
+    expect(cornerMatchesRawGreen).toBe(false);
+    void height;
+  });
+
+  it('shows the background, not the card color, in the masked-out corner region when cornerRadius is set', async () => {
+    const width = 1200;
+    const height = 630;
+    const foregroundSize = 600;
+    const cornerRadius = 60;
+    const input = await createSolidImage(1000, 1000, GREEN);
+
+    const result = await generateOgpImage(input, { width, height, foregroundSize, cornerRadius });
+    const { data, width: outWidth } = await readRawRgb(result.buffer);
+
+    const cardLeft = Math.round((width - foregroundSize) / 2);
+    const cardTop = Math.round((height - foregroundSize) / 2);
+
+    // A point just inside the card's bounding box but in its rounded-off
+    // corner: with masking applied this pixel is background (desaturated,
+    // not raw green); without masking (a plain square card) it would be
+    // raw green.
+    const maskedCorner = pixelAt(data, outWidth, cardLeft + 4, cardTop + 4);
+    const matchesRawGreen =
+      closeTo(maskedCorner.r, GREEN.r, TOLERANCE) &&
+      closeTo(maskedCorner.g, GREEN.g, TOLERANCE) &&
+      closeTo(maskedCorner.b, GREEN.b, TOLERANCE);
+    expect(matchesRawGreen).toBe(false);
+  });
+});
+
+describe('generateOgpFromLandscape: pixel-level cover-crop assertion', () => {
+  it('keeps the pure-color source at the canvas center', async () => {
+    const GREEN = { r: 20, g: 200, b: 40 };
+    const TOLERANCE = 4;
+    const input = await createSolidImage(2400, 1000, GREEN);
+
+    const result = await generateOgpFromLandscape(input);
+    const { data, info } = await sharp(result.buffer).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const idx = (Math.floor(info.height / 2) * info.width + Math.floor(info.width / 2)) * 3;
+
+    expect(Math.abs(data[idx] - GREEN.r)).toBeLessThanOrEqual(TOLERANCE);
+    expect(Math.abs(data[idx + 1] - GREEN.g)).toBeLessThanOrEqual(TOLERANCE);
+    expect(Math.abs(data[idx + 2] - GREEN.b)).toBeLessThanOrEqual(TOLERANCE);
+  });
+});
+
 describe('generateSmartOgp', () => {
   it('dispatches wide sources to the landscape branch', async () => {
     const input = await createSolidImage(2000, 900); // aspect ratio ~2.22, above default threshold
