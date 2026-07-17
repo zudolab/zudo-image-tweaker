@@ -1,0 +1,39 @@
+// Supplementary project (issue #68): server code, without the DOM lib.
+// NOT wired into the frozen "build"/"typecheck" npm scripts — both of those
+// run a single tsc pass over the WHOLE src tree (via tsconfig.json /
+// tsconfig.build.json), including src/browser/, so stripping DOM from that
+// shared config would break declaration emission for the browser subpath.
+// This config exists purely so src/__tests__/dom-boundary.test.ts can spawn
+// it to enforce the boundary as an additional, real gate under `pnpm test`.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "noEmit": true
+  },
+  // Explicit allowlist rather than "exclude": src/index.ts re-exports the
+  // browser module (see src/index.ts), so an exclude of src/browser/** alone
+  // doesn't isolate it — TS still pulls in re-exported files transitively
+  // even when they're excluded as root inputs. Listing every non-browser
+  // subpath module directly sidesteps that.
+  "include": [
+    "src/__tests__/**/*",
+    "src/blurhash/**/*",
+    "src/budget/**/*",
+    "src/calibrate/**/*",
+    "src/composite/**/*",
+    "src/exif/**/*",
+    "src/heif/**/*",
+    "src/ogp/**/*",
+    "src/product-photo/**/*",
+    "src/square/**/*",
+    "src/variants/**/*"
+  ],
+  // root-exports.test.ts imports src/index.ts, the root barrel, which itself
+  // re-exports the browser module — so it transitively pulls DOM-typed code
+  // back in no matter what's listed above. It's a public-API-surface pin,
+  // not server logic; excluded here for that reason, not because it's exempt
+  // from the boundary.
+  "exclude": ["src/__tests__/root-exports.test.ts"]
+}

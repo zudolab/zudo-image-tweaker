@@ -73,6 +73,36 @@ jobs:
       - name: attw (types resolution across module modes)
         run: pnpm -F @takazudo/zudo-image-tweaker exec attw --pack . --profile esm-only
 
+  browser-orientation-smoke:
+    name: Browser orientation smoke test (real Chrome pixels)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # jsdom can't implement Canvas/ImageBitmap, so the vitest suite can only
+      # assert bakeOrientation *calls* createImageBitmap correctly — never
+      # that the browser's own `imageOrientation: 'from-image'` handling is
+      # actually correct (issue #52). This drives the preinstalled system
+      # Chrome over CDP (no puppeteer/playwright dependency — package.json is
+      # frozen) to verify all 8 EXIF orientations against real pixels.
+      - name: Real-browser orientation pixel verification
+        run: node scripts/browser-orientation-smoke.mjs
+        working-directory: packages/zit
+
   macos-sips:
     name: Test with real sips (macOS)
     runs-on: macos-latest
