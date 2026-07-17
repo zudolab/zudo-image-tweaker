@@ -20,6 +20,7 @@ import {
   type ItemResult,
   type OgpOutput,
   type OutputNameFn,
+  type ParsedTag,
   type ProcessFailure,
   type ProcessImagesConfig,
   type ProcessOneConfig,
@@ -49,6 +50,9 @@ export class VariantProcessingError extends Error {
     this.stage = stage;
   }
 }
+
+/** An {@link ImageEntry} whose optional `tag` is known to be resolved. */
+type TaggedEntry = ImageEntry & { tag: ParsedTag };
 
 interface ResolvedConfig {
   outputDir: string;
@@ -113,14 +117,25 @@ function passthroughName(inputPath: string): string {
  * - webp: animated WebP — sharp decodes only the first frame on the still
  *   path, so re-encoding would silently flatten it (issue #28).
  * - png: APNG — same first-frame flattening on the still path.
- * - avif: animated AVIF (image sequence) — passthrough-copied whenever
- *   libvips reports its page count, first-frame-flattened otherwise.
  * Multi-page formats where a page is a document, not a frame (TIFF, PDF),
  * are deliberately excluded — those should go down the still path, which
  * renders page one. Animated sources are passthrough-copied byte-for-byte
  * (no width variants) rather than re-encoded.
+ *
+ * AVIF is deliberately NOT listed. Empirically, on the pinned sharp 0.35.3
+ * / libvips 8.18.3 stack a still AVIF is probed as `metadata.format ===
+ * 'heif'` (never 'avif') with `pages === 1` — so keying passthrough on
+ * 'avif' never matched, and every AVIF already took the still-variant path.
+ * Keying on 'heif' instead would make an AVIF's still-vs-animated routing
+ * hinge solely on the page count, which libvips can surface as `pages > 1`
+ * for a still AVIF carrying aux/gain-map layers — risking a silent,
+ * variants-less passthrough of a still image (the exact false-positive the
+ * review flagged). Until an animated-AVIF fixture exists to verify the
+ * boundary, still AVIFs are kept on the safe still-variant path (proven by
+ * the still-AVIF test in engine.test.ts); an animated AVIF sequence is
+ * first-frame flattened — a known limitation, not silent data loss.
  */
-const ANIMATED_PAGE_FORMATS = new Set(['gif', 'webp', 'png', 'avif']);
+const ANIMATED_PAGE_FORMATS = new Set(['gif', 'webp', 'png']);
 
 function isAnimatedSource(metadata: Metadata): boolean {
   return ANIMATED_PAGE_FORMATS.has(metadata.format ?? '') && (metadata.pages ?? 1) > 1;
@@ -160,7 +175,7 @@ function isSafeSlug(slug: string): boolean {
 // before it lack the retained profile. v3: removed the redundant
 // pre-pipeline bakeOrientation re-encode (issue #29) — variants produced
 // under bakeExifOrientation/stripMetadata before it carry an extra
-// generation of JPEG loss. v4: animated WebP/APNG/AVIF passthrough (issue
+// generation of JPEG loss. v4: animated WebP/APNG passthrough (issue
 // #28) — a pre-change cache for such a source records `animated: false`
 // plus a flattened-still manifest, so without the bump an unchanged source
 // stays a cache hit and never gets its passthrough copy.
@@ -190,7 +205,21 @@ function sameFileSet(a: string[], b: string[]): boolean {
   return sortedA.every((name, i) => name === sortedB[i]);
 }
 
+/**
+ * Output formats `applyFormat` accepts. The first five have tuned encoders;
+ * `tiff`/`gif` fall through to sharp's generic `toFormat`. A format outside
+ * this set is rejected with a clear error rather than cast blindly into
+ * sharp's `FormatEnum` — which would otherwise surface as an opaque sharp
+ * error deep in the encode instead of a named "unsupported format" failure.
+ */
+const SUPPORTED_OUTPUT_FORMATS = new Set(['webp', 'jpg', 'jpeg', 'png', 'avif', 'tiff', 'gif']);
+
 function applyFormat(pipeline: Sharp, format: string, quality: number): Sharp {
+  if (!SUPPORTED_OUTPUT_FORMATS.has(format)) {
+    throw new Error(
+      `unsupported output format "${format}" — expected one of ${[...SUPPORTED_OUTPUT_FORMATS].join(', ')}`,
+    );
+  }
   switch (format) {
     case 'webp':
       return pipeline.webp({ quality });
@@ -686,7 +715,11 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
   // Parse each filename's tag inside the collect-and-continue path: a custom
   // tagParser that throws for one file records a 'slug'-stage failure and
   // keeps going, rather than rejecting the whole batch.
-  const entries: ImageEntry[] = [];
+  //
+  // Every entry here is built WITH a resolved tag, so it's typed `TaggedEntry`
+  // — the invariant the downstream `.tag` reads rely on is encoded in the
+  // type rather than asserted away with `!`.
+  const entries: TaggedEntry[] = [];
   let tagParseFailed = false;
   for (const inputPath of paths) {
     try {
@@ -706,14 +739,14 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
   // directory (and thrash each other's cache on later runs), so any slug
   // claimed by more than one input is rejected up front rather than
   // processed non-deterministically.
-  const bySlug = new Map<string, ImageEntry[]>();
+  const bySlug = new Map<string, TaggedEntry[]>();
   for (const entry of entries) {
-    const group = bySlug.get(entry.tag!.slug);
+    const group = bySlug.get(entry.tag.slug);
     if (group) group.push(entry);
-    else bySlug.set(entry.tag!.slug, [entry]);
+    else bySlug.set(entry.tag.slug, [entry]);
   }
 
-  const unique: ImageEntry[] = [];
+  const unique: TaggedEntry[] = [];
   for (const [slug, group] of bySlug) {
     if (group.length === 1) {
       unique.push(group[0]);
@@ -749,7 +782,7 @@ export async function processImages(config: ProcessImagesConfig): Promise<Proces
   // that case rather than risk deleting that input's still-backed outputs.
   const removed =
     config.cleanupOrphans && !tagParseFailed
-      ? await cleanupOrphans(cfg.outputDir, new Set(entries.map((e) => e.tag!.slug)))
+      ? await cleanupOrphans(cfg.outputDir, new Set(entries.map((e) => e.tag.slug)))
       : [];
 
   return { results, failed, removed };

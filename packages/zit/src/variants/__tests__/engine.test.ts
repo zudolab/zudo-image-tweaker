@@ -298,6 +298,33 @@ describe('processImages — animated WebP passthrough (#28)', () => {
   });
 });
 
+describe('processImages — still AVIF is never passthrough-copied (review finding)', () => {
+  it('routes a still AVIF down the normal variant path (pages===1, format "heif")', async () => {
+    // Pin the empirical fact the ANIMATED_PAGE_FORMATS comment relies on:
+    // on the pinned sharp 0.35.3 / libvips stack a still AVIF is probed as
+    // format 'heif' with pages 1, so it must NOT match the animated set and
+    // must NOT be byte-copied as an "original" without width variants.
+    const stillAvif = await sharp({
+      create: { width: 700, height: 500, channels: 3, background: { r: 30, g: 120, b: 60 } },
+    })
+      .avif({ quality: 50 })
+      .toBuffer();
+    const probed = await sharp(stillAvif).metadata();
+    expect(probed.format).toBe('heif');
+    expect(probed.pages ?? 1).toBe(1);
+
+    await fs.writeFile(path.join(inputDir, 'shot.avif'), stillAvif);
+
+    const summary = await processImages({ inputDir, outputDir });
+    expect(summary.failed).toEqual([]);
+    expect(summary.results[0].animated).toBe(false);
+    // Resized width variants were emitted...
+    expect(await exists(path.join(outputDir, 'shot', '600w.webp'))).toBe(true);
+    // ...and no byte-for-byte passthrough copy was left behind.
+    expect(await exists(path.join(outputDir, 'shot', 'original.avif'))).toBe(false);
+  });
+});
+
 describe('processImages — orphan cleanup', () => {
   it('is opt-in and only removes directories directly under the output dir', async () => {
     await writeJpeg('keep.jpg', 400, 400);
