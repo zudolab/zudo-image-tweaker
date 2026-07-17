@@ -135,8 +135,15 @@ function isSafeSlug(slug: string): boolean {
  * (`CacheEntry.outputs`), compared in the cache check — which also covers
  * that fallback filename.
  */
+// Bump when the pipeline's output semantics change without any config
+// changing, so pre-change cache entries stop matching and outputs are
+// regenerated. v2: ICC colour management (issue #71) — variants produced
+// before it lack the retained profile.
+const PIPELINE_VERSION = 2;
+
 function fingerprintConfig(cfg: ResolvedConfig): string {
   return JSON.stringify({
+    pipelineVersion: PIPELINE_VERSION,
     quality: cfg.quality,
     widths: cfg.widths,
     formats: cfg.formats,
