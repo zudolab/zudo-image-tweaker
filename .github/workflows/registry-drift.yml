@@ -113,9 +113,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          NUMBER=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
-            --json number,title \
-            --jq --arg t "$TRACKING_ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -n1)
+          NUMBER=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+            | jq -r --arg t "$TRACKING_ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -n1)
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Open or update tracking issue on failure

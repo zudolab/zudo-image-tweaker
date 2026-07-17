@@ -20,8 +20,14 @@ name: NPM Token Rotation Reminder
 
 on:
   schedule:
-    # Monthly, off the top of the hour to avoid the scheduler pile-up at :00.
-    - cron: "23 6 1 * *"
+    # Weekly (not monthly): a monthly cadence combined with a 75-day
+    # threshold can overshoot — a token rotated just after one run would
+    # next be checked at ~30 days, then ~60, then ~90-91 days old, so the
+    # very first reminder could land after the 90-day cap already expired.
+    # Weekly closes that gap to a few days, well inside the 15-day margin
+    # (threshold 75 vs cap 90). Offset from registry-drift.yml's Monday run
+    # to spread scheduled-workflow load across the week.
+    - cron: "42 6 * * 3"
   workflow_dispatch: {}
 
 permissions:
@@ -69,9 +75,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          NUMBER=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
-            --json number,title \
-            --jq --arg t "$TRACKING_ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -n1)
+          NUMBER=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+            | jq -r --arg t "$TRACKING_ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -n1)
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Open or update reminder issue
