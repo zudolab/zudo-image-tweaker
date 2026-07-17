@@ -1,0 +1,6 @@
+# Marks doc/ as its own pnpm workspace root. Without this, `pnpm -C doc
+# install` walks up and attaches to the repo-root pnpm-workspace.yaml instead
+# (doc/ isn't listed there), silently skipping doc/'s own install — no
+# doc/node_modules, no doc/pnpm-lock.yaml, no error. This file stops that
+# upward search so doc/ installs and locks independently.
+packages: []
