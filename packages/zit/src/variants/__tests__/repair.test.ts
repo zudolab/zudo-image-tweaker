@@ -128,6 +128,21 @@ describe('repairCorruptedImage', () => {
     expect(swapCall![1][swapCall![1].length - 1]).toMatch(/\.png$/);
   });
 
+  it('re-encodes a corrupt PNG in its own format first, then swaps to JPEG (issue #99)', async () => {
+    mockRun.mockImplementation(toolPresent('magick'));
+    const dir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'zit-repair-png-'));
+    const pngPath = path.join(dir, 'broken.png');
+    await fsPromises.writeFile(pngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47])); // PNG-ish header
+
+    const repaired = await repairCorruptedImage(pngPath);
+    expect(repaired).not.toBeNull();
+
+    // The strip pass re-encodes in the source's own format (.png), so the
+    // sibling-format swap actually changes format for PNG inputs (issue #99).
+    const stripCall = mockRun.mock.calls.find((c) => c[0] === 'magick' && c[1].includes('-strip'));
+    expect(stripCall![1][stripCall![1].length - 1]).toMatch(/\.png$/);
+  });
+
   it('backs up the corrupt source to <name>.corrupted.bak when backupCorrupted is set', async () => {
     mockRun.mockImplementation(toolPresent('magick'));
     const dir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'zit-repair-bak-'));

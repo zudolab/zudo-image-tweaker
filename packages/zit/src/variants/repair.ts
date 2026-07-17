@@ -55,13 +55,13 @@ async function repairWith(
 }
 
 /**
- * The sibling raster format to re-decode a corrupt source through. A damaged
- * JPEG bitstream sometimes survives a round-trip through PNG (and vice versa)
- * when a same-format re-encode can't recover it. Unknown/other extensions
- * default to PNG — lossless, and the most tolerant re-decode target.
+ * The JPEG/PNG re-encode pair to try, in order: the source's own format first
+ * (a JPEG re-encodes as JPEG, a PNG as PNG), then the sibling. A bitstream a
+ * same-format re-encode can't recover sometimes survives the decoder switch to
+ * the sibling. Sources that aren't JPEG or PNG default to `['jpg', 'png']`.
  */
-function siblingFormat(inputPath: string): 'png' | 'jpg' {
-  return path.extname(inputPath).toLowerCase() === '.png' ? 'jpg' : 'png';
+function repairFormatPair(inputPath: string): ['png' | 'jpg', 'png' | 'jpg'] {
+  return path.extname(inputPath).toLowerCase() === '.png' ? ['png', 'jpg'] : ['jpg', 'png'];
 }
 
 /**
@@ -118,22 +118,26 @@ export async function repairCorruptedImage(
   }
 
   if (await hasMagick()) {
-    // Strategy 1: strip metadata + normalise colourspace, re-encoding to JPEG.
+    const [primaryExt, siblingExt] = repairFormatPair(inputPath);
+
+    // Strategy 1: strip metadata + normalise colourspace, re-encoding in the
+    // source's own format (jpg->jpg, png->png; other formats default to jpg).
     const stripped = await repairWith(
       'magick',
       (input, output) => [input, '-strip', '-set', 'colorspace', 'sRGB', output],
       inputPath,
+      primaryExt,
     );
     if (stripped) return stripped;
 
-    // Strategy 2: format-swap re-decode. Re-encode through the sibling raster
-    // format (jpg<->png); a bitstream the same-format strip pass can't recover
+    // Strategy 2: format-swap re-decode through the sibling raster format
+    // (jpg<->png); a bitstream the same-format strip pass can't recover
     // sometimes survives the decoder switch (issue #99).
     const swapped = await repairWith(
       'magick',
       (input, output) => [input, output],
       inputPath,
-      siblingFormat(inputPath),
+      siblingExt,
     );
     if (swapped) return swapped;
   }
