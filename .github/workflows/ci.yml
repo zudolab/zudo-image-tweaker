@@ -115,6 +115,18 @@ jobs:
         with:
           node-version: 22
 
+      # doc/examples-check/tsconfig.json maps every subpath import straight at
+      # packages/zit/dist/**/*.d.ts (plus packages/zit/node_modules/sharp for
+      # re-exported sharp types), so the root workspace must be installed and
+      # packages/zit built in THIS job before check:examples can resolve
+      # anything — this job runs on its own clean checkout, it does not
+      # inherit the build-and-check job's build output.
+      - name: Install root workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages/zit
+        run: pnpm -F @takazudo/zudo-image-tweaker build
+
       # doc/ is a standalone create-zudo-doc project outside the pnpm
       # workspace (deliberate — see root CLAUDE.md), so it gets its own
       # install scoped to -C doc rather than joining `pnpm install` above.
