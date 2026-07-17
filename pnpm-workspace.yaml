@@ -1,0 +1,32 @@
+packages:
+  - "packages/*"
+
+# doc/ is intentionally NOT listed here — it is a standalone zudo-doc site
+# installed separately via `pnpm -C doc install`, kept out of this workspace
+# so its own dependency tree never affects the published package's lockfile.
+
+# pnpm 11 only reads auth/registry from .npmrc and ignores pnpm.* in package.json.
+# Everything else (peer-deps policy, engine strictness, supply-chain delays,
+# build-script allowlist) lives here. See https://pnpm.io/settings.
+autoInstallPeers: true
+strictPeerDependencies: false
+preferFrozenLockfile: true
+engineStrict: true
+
+# pnpm 11 defaults minimumReleaseAge to 1440 (24h), which would block CI
+# `pnpm install --frozen-lockfile` on any dep published in the last day. CI must
+# be deterministic, so disable the delay here.
+minimumReleaseAge: 0
+
+# pnpm 11 replaces the legacy `onlyBuiltDependencies` list with `allowBuilds`,
+# a per-package true/false map. Each entry is a deliberate decision to allow the
+# dependency's install/postinstall script. esbuild ships a Go binary and
+# lefthook ships a native binary (both dev tooling only); sharp builds/
+# downloads libvips bindings and is a runtime dependency of packages/zit;
+# onnxruntime-node ships a native ONNX runtime binary, pulled in transitively
+# by the (optional peer, dev-installed-for-tests) @imgly/background-removal-node.
+allowBuilds:
+  esbuild: true
+  lefthook: true
+  onnxruntime-node: true
+  sharp: true
