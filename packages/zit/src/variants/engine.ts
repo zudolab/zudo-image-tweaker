@@ -108,6 +108,25 @@ function passthroughName(inputPath: string): string {
 }
 
 /**
+ * Formats where `metadata.pages > 1` means animation frames, per format:
+ * - gif: multi-frame GIF (the original passthrough case).
+ * - webp: animated WebP — sharp decodes only the first frame on the still
+ *   path, so re-encoding would silently flatten it (issue #28).
+ * - png: APNG — same first-frame flattening on the still path.
+ * - avif: animated AVIF (image sequence) — passthrough-copied whenever
+ *   libvips reports its page count, first-frame-flattened otherwise.
+ * Multi-page formats where a page is a document, not a frame (TIFF, PDF),
+ * are deliberately excluded — those should go down the still path, which
+ * renders page one. Animated sources are passthrough-copied byte-for-byte
+ * (no width variants) rather than re-encoded.
+ */
+const ANIMATED_PAGE_FORMATS = new Set(['gif', 'webp', 'png', 'avif']);
+
+function isAnimatedSource(metadata: Metadata): boolean {
+  return ANIMATED_PAGE_FORMATS.has(metadata.format ?? '') && (metadata.pages ?? 1) > 1;
+}
+
+/**
  * A slug must be a single, safe directory segment. This rejects `''`, `.`,
  * `..`, and anything containing a path separator or NUL — a filename like
  * `...jpg` otherwise parses to the slug `..`, which would escape outputDir.
@@ -141,8 +160,11 @@ function isSafeSlug(slug: string): boolean {
 // before it lack the retained profile. v3: removed the redundant
 // pre-pipeline bakeOrientation re-encode (issue #29) — variants produced
 // under bakeExifOrientation/stripMetadata before it carry an extra
-// generation of JPEG loss.
-const PIPELINE_VERSION = 3;
+// generation of JPEG loss. v4: animated WebP/APNG/AVIF passthrough (issue
+// #28) — a pre-change cache for such a source records `animated: false`
+// plus a flattened-still manifest, so without the bump an unchanged source
+// stays a cache hit and never gets its passthrough copy.
+const PIPELINE_VERSION = 4;
 
 function fingerprintConfig(cfg: ResolvedConfig): string {
   return JSON.stringify({
@@ -305,8 +327,9 @@ async function allExist(dir: string, files: string[]): Promise<boolean> {
 
 /**
  * Process a single image end-to-end: HEIC conversion, content-hash cache
- * check, corruption repair, blurhash, width variants (or animated-GIF
- * passthrough), and optional OGP — dispatched by the entry's tag.
+ * check, corruption repair, blurhash, width variants (or byte-for-byte
+ * passthrough for animated GIF/WebP/APNG — see ANIMATED_PAGE_FORMATS), and
+ * optional OGP — dispatched by the entry's tag.
  *
  * Throws {@link VariantProcessingError} on a genuine processing failure
  * (carrying the failing `stage`); returns a `skipped` result for a
@@ -332,7 +355,14 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
   // hit lets us skip before the costly work (HEIC decode, `file` sniff). A
   // config change (different quality, etc.) invalidates it even when the
   // source bytes are unchanged.
-  const fileHash = await hashFile(inputPath);
+  let fileHash: string;
+  try {
+    fileHash = await hashFile(inputPath);
+  } catch (error) {
+    // An unreadable source (ENOENT, EACCES) fails here, before any pipeline
+    // stage — tag it 'io' so it doesn't surface as a raw 'unknown' (#45).
+    throw new VariantProcessingError('io', error);
+  }
   const cache = await readCache(cachePath);
   // `cache.mode` gates on the tag pipeline too: a pre-`mode` (older-format)
   // entry has it undefined and so never matches, which safely forces a
@@ -365,7 +395,11 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
     return { ...base, status: 'skipped', reason: 'not-an-image', animated: false, variants: [], ogp: null, metadata: null };
   }
 
-  await fs.mkdir(imageOutputDir, { recursive: true });
+  try {
+    await fs.mkdir(imageOutputDir, { recursive: true });
+  } catch (error) {
+    throw new VariantProcessingError('io', error);
+  }
 
   let processInput: string | Buffer = inputPath;
   if (await isHeicSource(inputPath)) {
@@ -392,7 +426,7 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
   if (!displayWidth || !displayHeight) {
     throw new VariantProcessingError('probe', new Error(`could not determine dimensions for "${slug}"`));
   }
-  const animated = metadata.format === 'gif' && (metadata.pages ?? 1) > 1;
+  const animated = isAnimatedSource(metadata);
 
   if (mode === 'ogonly') {
     let ogp: OgpOutput;
@@ -474,7 +508,15 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
         if (error instanceof VariantProcessingError) throw error;
         throw new VariantProcessingError('variants', error);
       }
-      pipeline = await runPipeline(repaired);
+      // The retry gets the same stage mapping as the first attempt: without
+      // it a failure on the retried pipeline propagates untagged and lands
+      // as stage 'unknown' (#45).
+      try {
+        pipeline = await runPipeline(repaired);
+      } catch (retryError) {
+        if (retryError instanceof VariantProcessingError) throw retryError;
+        throw new VariantProcessingError('variants', retryError);
+      }
     }
     ({ blurhash, variants, ogp } = pipeline);
   }
@@ -510,7 +552,18 @@ export async function processOne(entry: ImageEntry, config: ProcessOneConfig): P
 }
 
 async function collectFiles(config: ProcessImagesConfig): Promise<string[]> {
+  // Dedupe by resolved path (first occurrence wins): `files` is documented
+  // as usable "in addition to scanning inputDir", so the same file reachable
+  // via both must process once — not trip the duplicate-slug guard (#46).
+  // True slug collisions between DIFFERENT files still fail downstream.
+  const seen = new Set<string>();
   const files: string[] = [];
+  const add = (filePath: string): void => {
+    const resolved = path.resolve(filePath);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    files.push(filePath);
+  };
   if (config.inputDir) {
     const inputDir = config.inputDir;
     let names: string[];
@@ -522,10 +575,10 @@ async function collectFiles(config: ProcessImagesConfig): Promise<string[]> {
       });
     }
     for (const name of names.sort()) {
-      if (IMAGE_EXTENSION_REGEX.test(name)) files.push(path.join(inputDir, name));
+      if (IMAGE_EXTENSION_REGEX.test(name)) add(path.join(inputDir, name));
     }
   }
-  if (config.files) files.push(...config.files);
+  if (config.files) for (const filePath of config.files) add(filePath);
   return files;
 }
 

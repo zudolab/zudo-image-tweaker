@@ -53,4 +53,14 @@ describe('variant-stage corruption repair', () => {
       VariantProcessingError,
     );
   });
+
+  it("tags a failed retry with stage 'variants' instead of a raw untagged error (#45)", async () => {
+    // Repair "succeeds" but hands back bytes that are still pixel-truncated,
+    // so the retried pipeline fails exactly like the first attempt did.
+    mockRepair.mockResolvedValue(validJpeg.subarray(0, Math.floor(validJpeg.length * 0.5)));
+    await expect(processOne({ inputPath: truncatedPath }, { outputDir })).rejects.toMatchObject({
+      name: 'VariantProcessingError',
+      stage: 'variants',
+    });
+  });
 });

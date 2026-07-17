@@ -21,7 +21,7 @@ export interface CacheEntry {
    * outputs from satisfying the new mode's expected-output subset.
    */
   mode: TagMode;
-  /** Whether the source was handled as an animated-GIF passthrough. */
+  /** Whether the source was handled as an animated passthrough (GIF/WebP/APNG). */
   animated: boolean;
   /**
    * The exact filenames this run emitted into the slug directory. Compared
