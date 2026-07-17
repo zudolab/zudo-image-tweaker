@@ -34,7 +34,9 @@ ArrayBuffer | Uint8Array | Uint8ClampedArray`).
 
 - **`compositeOverlay`** — a single base/overlay composite. The overlay is
   always resized to a 1:1 square (`'cover'` fit) at `widthPercent` of the
-  base's width, then anchored to a corner with a `paddingPercent` gap.
+  base's width, then anchored to a corner with a `paddingPercent` gap. The
+  result buffer is always re-encoded as PNG, regardless of the base image's
+  original format.
 - **`compositeBatch`** — runs `compositeOverlay` over the cartesian product
   of a `bases` list and an `overlays` list (every base × every overlay),
   processed with a bounded-concurrency worker pool.
@@ -102,3 +104,6 @@ for (const { baseRef, overlayRef, result } of results) {
   more corners later).
 - **`compositeBatch` validates `concurrency` eagerly.** A non-finite or
   `< 1` value throws immediately instead of silently defaulting or hanging.
+- **Output is always PNG.** `compositeOverlay` re-encodes the composited
+  result as PNG regardless of the base image's input format (JPEG, WebP,
+  etc.) — `CompositeOverlayResult.buffer` is a PNG buffer.

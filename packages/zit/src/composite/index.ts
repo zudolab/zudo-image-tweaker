@@ -21,6 +21,12 @@ export interface CompositeOverlayResult {
   height: number;
 }
 
+/**
+ * Composites `overlay` onto a corner of `base` and returns the result.
+ *
+ * The output buffer is always re-encoded as PNG, regardless of `base`'s
+ * original format.
+ */
 export async function compositeOverlay(
   base: ImageInput,
   overlay: ImageInput,
