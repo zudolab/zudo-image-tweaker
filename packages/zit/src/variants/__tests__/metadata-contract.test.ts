@@ -152,6 +152,16 @@ describe('variants: stripMetadata × bakeExifOrientation contract (issues #29/#8
     }
   });
 
+  it('toggling the no-op bakeExifOrientation flag keeps the cache hit', async () => {
+    const outputDir = path.join(root, 'out-cache');
+    const config = { outputDir, widths: [VARIANT.width], formats: FORMATS };
+    const first = await processOne({ inputPath }, { ...config, bakeExifOrientation: false });
+    expect(first.status).toBe('processed');
+    const second = await processOne({ inputPath }, { ...config, bakeExifOrientation: true });
+    expect(second.status).toBe('skipped');
+    expect(second.reason).toBe('cache-hit');
+  });
+
   it('stripMetadata + bakeExifOrientation adds no re-encode over stripMetadata alone', async () => {
     const stripOnly = await runCell({ stripMetadata: true, bakeExifOrientation: false });
     const both = await runCell({ stripMetadata: true, bakeExifOrientation: true });

@@ -153,7 +153,9 @@ function fingerprintConfig(cfg: ResolvedConfig): string {
     ogpFileName: cfg.ogpFileName,
     ogpOptions: cfg.ogpOptions,
     fallbackBlurhash: cfg.fallbackBlurhash ?? null,
-    bakeExifOrientation: cfg.bakeExifOrientation,
+    // bakeExifOrientation is deliberately NOT fingerprinted: it is a no-op
+    // (orientation is always baked at encode time, issue #29), so toggling
+    // it must keep the cache hit rather than regenerate identical outputs.
     stripMetadata: cfg.stripMetadata,
   });
 }
