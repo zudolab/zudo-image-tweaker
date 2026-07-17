@@ -47,6 +47,16 @@ describe('isHeicSource', () => {
     expect(await isHeicSource('/x/a.jpg')).toBe(true);
   });
 
+  it('sniffs a HEIF sequence (burst/live-photo) payload wearing a .jpg extension', async () => {
+    fileSays('image/heif-sequence');
+    expect(await isHeicSource('/x/a.jpg')).toBe(true);
+  });
+
+  it('sniffs a HEIC sequence (burst/live-photo) payload wearing a .jpg extension', async () => {
+    fileSays('image/heic-sequence');
+    expect(await isHeicSource('/x/a.jpg')).toBe(true);
+  });
+
   it('leaves a genuine JPEG alone', async () => {
     fileSays('image/jpeg');
     expect(await isHeicSource('/x/a.jpg')).toBe(false);
@@ -83,6 +93,16 @@ describe('isNonImageFile', () => {
   it('flags a plain-text file', async () => {
     fileSays('text/plain');
     expect(await isNonImageFile('/x/a.png')).toBe(true);
+  });
+
+  it('flags an XML response saved as an image', async () => {
+    fileSays('text/xml');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(true);
+  });
+
+  it('flags a CSV response saved as an image', async () => {
+    fileSays('text/csv');
+    expect(await isNonImageFile('/x/a.jpg')).toBe(true);
   });
 
   it('passes a real image through', async () => {

@@ -67,6 +67,13 @@ describe.skipIf(!fileBinaryAvailable)('real `file` binary detection', () => {
     expect(await isNonImageFile(textAsPng)).toBe(true);
   });
 
+  it('flags a real XML error response saved as an image', async () => {
+    const xmlAsJpeg = path.join(tmpDir, 'error.jpg');
+    await fs.writeFile(xmlAsJpeg, '<?xml version="1.0"?><error>not found</error>');
+
+    expect(await isNonImageFile(xmlAsJpeg)).toBe(true);
+  });
+
   it('correctly handles a real HEIC payload under a directory named HTML-exports/', async () => {
     const htmlExportsDir = path.join(tmpDir, 'HTML-exports');
     await fs.mkdir(htmlExportsDir, { recursive: true });

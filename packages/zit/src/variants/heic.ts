@@ -5,8 +5,16 @@ import { isMissingBinaryError, run } from './run.js';
 const HEIC_EXTENSIONS = new Set(['.heic', '.heif']);
 const JPEG_EXTENSIONS = new Set(['.jpg', '.jpeg']);
 
-const HEIC_MIME_TYPES = new Set(['image/heic', 'image/heif']);
-const NON_IMAGE_MIME_TYPES = new Set(['text/html', 'text/plain']);
+// `file` reports the `-sequence` variants for HEIC/HEIF burst/live-photo
+// payloads (multiple embedded images), which still need HEIF conversion.
+const HEIC_MIME_TYPES = new Set(['image/heic', 'image/heic-sequence', 'image/heif', 'image/heif-sequence']);
+// Loose `text/*` match (rather than an exact-value allowlist) catches HTML,
+// plain text, XML, CSV, and any other textual response saved with an image
+// extension — the same breadth the old "HTML"/"ASCII text" substring match
+// covered, without reintroducing a path-substring false positive.
+function isNonImageMimeType(mimeType: string): boolean {
+  return mimeType.startsWith('text/');
+}
 
 /**
  * Returns the exact MIME type reported by `file -b --mime-type` (e.g.
@@ -53,5 +61,5 @@ export async function isHeicSource(inputPath: string): Promise<boolean> {
 export async function isNonImageFile(inputPath: string): Promise<boolean> {
   const mimeType = await identify(inputPath);
   if (mimeType === null) return false;
-  return NON_IMAGE_MIME_TYPES.has(mimeType);
+  return isNonImageMimeType(mimeType);
 }
