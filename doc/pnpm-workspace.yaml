@@ -4,3 +4,13 @@
 # doc/node_modules, no doc/pnpm-lock.yaml, no error. This file stops that
 # upward search so doc/ installs and locks independently.
 packages: []
+
+# pnpm 11 fails CI installs with ERR_PNPM_IGNORED_BUILDS when a dependency's
+# build script is not explicitly approved. The zudo-doc/zfb toolchain needs:
+# esbuild (Go binary), sharp (libvips bindings, used by zudo-doc's image
+# handling), workerd (Cloudflare workers runtime binary, via the zfb
+# cloudflare adapter / wrangler).
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true
