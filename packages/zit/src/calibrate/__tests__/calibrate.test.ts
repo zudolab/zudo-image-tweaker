@@ -284,6 +284,16 @@ describe('normalizeBackgroundColor', () => {
     expect((await sharp(result.buffer).metadata()).icc).toBeUndefined();
   });
 
+  it('rejects a non-positive or fractional patchSize instead of silently miscounting pixels', async () => {
+    const raw = buildRawImage(200, 200, solidColorAt(BG));
+    const png = await toPng(raw, 200, 200);
+    const target: RgbColor = { r: 180, g: 80, b: 90 };
+
+    await expect(normalizeBackgroundColor(png, { target, patchSize: 0 })).rejects.toThrow(/positive integer/i);
+    await expect(normalizeBackgroundColor(png, { target, patchSize: -5 })).rejects.toThrow(/positive integer/i);
+    await expect(normalizeBackgroundColor(png, { target, patchSize: 10.5 })).rejects.toThrow(/positive integer/i);
+  });
+
   it('EXIF policy: EXIF is always dropped from the output (documented in the module/function JSDoc)', async () => {
     const raw = buildRawImage(200, 200, solidColorAt(BG));
     const jpeg = await sharp(raw, { raw: { width: 200, height: 200, channels: 3 } })

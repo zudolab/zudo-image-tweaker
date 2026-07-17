@@ -478,6 +478,13 @@ export async function normalizeBackgroundColor(
     channelClamp = DEFAULT_CHANNEL_CLAMP,
     format,
   } = opts;
+  // sampleBackgroundColor's sharp `.extract()` call rejects a non-positive
+  // or fractional patchSize on its own; the in-memory sampler below has no
+  // equivalent guard (a 0 divides by zero into NaN scales, a negative or
+  // fractional value silently miscounts pixels), so validate explicitly.
+  if (!Number.isInteger(patchSize) || patchSize <= 0) {
+    throw new Error(`patchSize must be a positive integer, got ${patchSize}`);
+  }
   const minDimension = patchSize + PATCH_MARGIN * 2;
 
   const { sharpInput, cleanup } = await resolveDecodeSource(input);
