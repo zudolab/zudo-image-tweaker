@@ -26,7 +26,9 @@
 # The pre-publish artifact gate is scripts/check-pack.sh — it packs the tree,
 # installs the tarball into a scratch project, and resolves the root import
 # plus every subpath export before npm publish ever runs. The same script also
-# runs in ci.yml on every PR.
+# runs in ci.yml on every PR. publint + attw run right after (mirroring the
+# ci.yml steps) because a raw v* tag push bypasses ci.yml entirely — this is
+# the only gate a tag-triggered release actually goes through.
 #
 # Action SHAs are pinned to immutable commits (OpenSSF best practice); the
 # trailing comment names the release for human readability.
@@ -101,8 +103,19 @@ jobs:
 
       # Pre-publish artifact gate: pack + install-test + resolve every subpath
       # export. Runs on dry_run too, so a manual dispatch actually exercises it.
+      # This also builds dist/ (via its own internal `pnpm run build`), which
+      # publint/attw below need to inspect.
       - name: Check pack (verify published artifact)
         run: bash scripts/check-pack.sh
+
+      # Release-gate mirror of ci.yml's publint/attw steps: a raw v* tag push
+      # bypasses ci.yml entirely, so the packaging gate must also run here,
+      # before the irreversible npm publish below. Runs on dry_run too.
+      - name: publint (package.json validity)
+        run: pnpm -F @takazudo/zudo-image-tweaker exec publint
+
+      - name: attw (types resolution across module modes)
+        run: pnpm -F @takazudo/zudo-image-tweaker exec attw --pack . --profile esm-only
 
       - name: DRY RUN — skip publish
         if: ${{ inputs.dry_run == true }}

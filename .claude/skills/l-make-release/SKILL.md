@@ -432,10 +432,13 @@ cd packages/zit
 
 Run `publint` — this **blocks**. publint findings on this ESM-only, subpath-export
 package are almost always real bugs (a path in `exports` that doesn't exist, a file
-referenced but missing from the `files` whitelist):
+referenced but missing from the `files` whitelist). Use the locally pinned
+devDependency via `pnpm exec` (not `pnpm dlx`, which would fetch an unpinned
+latest version — package.json/lockfile pin the exact version this project validates
+against):
 
 ```bash
-pnpm dlx publint
+pnpm exec publint
 ```
 
 If `publint` reports errors, **stop and surface them**. Do NOT push the tag — fix
@@ -443,10 +446,11 @@ the packaging issue, commit + push, re-run CI (Step 6), and re-validate.
 
 Run `attw` and `pnpm pack` for **human review only** — do not block on them. `attw`
 is built around dual ESM/CJS packages and emits noise on an ESM-only package with
-multiple subpath exports; read its output, but a clean `publint` is the gate:
+multiple subpath exports; `--profile esm-only` scopes it to the resolution modes
+that actually apply. Read its output, but a clean `publint` is the gate:
 
 ```bash
-pnpm dlx @arethetypeswrong/cli --pack .       # advisory — review, do not block
+pnpm exec attw --pack . --profile esm-only    # advisory — review, do not block; locally pinned, not pnpm dlx
 pnpm pack --pack-destination /tmp             # then inspect the tarball contents:
 tar -tzf /tmp/takazudo-zudo-image-tweaker-<version>.tgz | sort
 cd ../..                                       # return to repo root
