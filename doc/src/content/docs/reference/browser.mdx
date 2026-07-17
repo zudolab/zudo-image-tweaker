@@ -1,0 +1,162 @@
+---
+title: browser
+description: The package's one client-safe subpath — HEIC transcode, EXIF read, and orientation bake for a File before upload.
+sidebar_position: 12
+---
+
+## What it does
+
+`@takazudo/zudo-image-tweaker/browser` is a client-side pre-upload pipeline:
+given a `File` picked in a browser, it transcodes HEIC/HEIF to JPEG, reads
+EXIF capture date and orientation, bakes any needed rotation into the pixels
+via canvas, and measures the final dimensions — so the bytes leaving the
+browser need no further EXIF-orientation handling downstream.
+
+## Client-safe guarantee
+
+:::info[No sharp, no node: builtins]
+Every other subpath in this package assumes a Node/`sharp` environment.
+`/browser` is the one exception, and it's enforced by an automated build
+check: the built `/browser` chunk is inspected for `sharp` imports or any
+`node:` specifier, and the check fails if either appears — including a
+transitive import introduced by a future change, not just a direct one.
+:::
+
+## Exports
+
+```ts
+function prepareImageForUpload(
+  file: File,
+  opts?: PrepareImageForUploadOptions,
+): Promise<PreparedImage>;
+function deriveGeometry(w: number, h: number): DerivedGeometry;
+function deriveOrientation(w: number, h: number): Orientation;
+function roundAspectRatio(w: number, h: number): number;
+function needsOrientationBake(exifOrientation: number | undefined): boolean;
+
+const HEIC_DECODE_FAILED_MESSAGE: string;
+const ORIENTATION_BAKE_FAILED_MESSAGE_PREFIX: string;
+
+type Orientation = 'landscape' | 'portrait' | 'square';
+interface Dimensions {
+  w: number;
+  h: number;
+}
+interface DerivedGeometry {
+  dimensions: Dimensions;
+  aspectRatio: number;
+  orientation: Orientation;
+}
+```
+
+- **`prepareImageForUpload`** — the pipeline entry point; see
+  [HEIC keep-raw fallback](#heic-keep-raw-fallback) below for its exact
+  step order.
+- **`deriveGeometry`/`deriveOrientation`/`roundAspectRatio`** — pure
+  dimension utilities, framework-agnostic so they're unit-testable without
+  touching the DOM or the Canvas API. `roundAspectRatio` rounds to 4
+  decimal places and returns `0` (not `Infinity`/`NaN`) when `h` is `0` or
+  either input is non-finite — callers should treat a `0` aspect ratio as
+  "unknown."
+- **`needsOrientationBake`** — decides whether a raw EXIF `Orientation` tag
+  value (1-8) requires a canvas rotate/flip before upload. `1` (or
+  `undefined`) means already upright; `2`-`8` need a bake.
+
+## Optional peers
+
+`exifr` and `heic2any` are both dynamic-imported only when
+`prepareImageForUpload` actually runs, so they're never forced into a
+consumer's bundle otherwise. Install them only if you use this module:
+
+```sh
+pnpm add exifr heic2any
+```
+
+See [Security & Heavy Dependencies](../guides/security-and-heavy-deps.mdx)
+for what each optional peer is used for, and
+[Installation](../getting-started/installation.mdx) for the general
+optional-peer pattern this package uses.
+
+## Options
+
+### `PrepareImageForUploadOptions`
+
+| Name | Type | Default | Effect |
+|---|---|---|---|
+| `heicQuality` | `number` | `0.9` | JPEG quality (0-1) used when transcoding HEIC/HEIF to JPEG via `heic2any`. |
+| `bakeQuality` | `number` | `0.92` | Quality (0-1) passed to the canvas re-encode after an orientation bake. Applies to JPEG and WebP output (both lossy); ignored for PNG output, which stays lossless. |
+
+### `PreparedImage` result
+
+| Name | Type | Effect |
+|---|---|---|
+| `file` | `File \| Blob` | Upload-ready bytes: JPEG when HEIC was transcoded; when orientation was baked, the canvas re-encode keeps the original PNG/WebP MIME type or falls back to JPEG for any other type; otherwise the original file untouched. |
+| `width` / `height` | `number` | Measured dimensions of the final bytes. |
+| `takenAt` | `Date \| null` | EXIF capture date, if present and parseable. |
+| `orientation` | `Orientation` | Derived from the final `width`/`height`. |
+| `transcodedFromHeic` | `boolean` | Whether the HEIC → JPEG transcode succeeded. |
+
+## Example
+
+```ts
+import { prepareImageForUpload } from '@takazudo/zudo-image-tweaker/browser';
+
+async function handleFileSelect(file: File) {
+  const { file: uploadFile, width, height, orientation, transcodedFromHeic } =
+    await prepareImageForUpload(file);
+
+  console.log(`${width}x${height} ${orientation}, transcoded from HEIC: ${transcodedFromHeic}`);
+  return uploadFile;
+}
+```
+
+## HEIC keep-raw fallback
+
+`prepareImageForUpload` never lets a HEIC transcode failure block the
+upload outright — it degrades in stages:
+
+1. **Detect.** `isHeic(file)` checks the file's MIME type or filename
+   extension for HEIC/HEIF.
+2. **Transcode, with graceful fallback.** If HEIC, `heic2any` attempts a
+   JPEG transcode. **On failure, the raw HEIC bytes are kept as-is**
+   (`transcodedFromHeic` stays `false`) rather than throwing immediately —
+   a later step, or the server, may still be able to deal with them.
+3. **Read EXIF from the *original* file, always.** `heic2any` strips all
+   metadata from its JPEG output, so reading `takenAt` from the transcoded
+   blob would silently lose it. The `Orientation` tag is requested only
+   for non-transcoded bytes — a successful `heic2any` transcode already
+   bakes rotation into its own JPEG output, so re-checking orientation on
+   those bytes would compare against metadata that's no longer meaningful.
+4. **Bake orientation (if needed) or just measure dimensions.** If the
+   final decode step fails:
+   - and the input was raw, untranscoded HEIC (the browser can't natively
+     decode HEIC either), it throws `HEIC_DECODE_FAILED_MESSAGE` rather
+     than silently returning a `0x0` placeholder;
+   - or if an orientation bake was required (EXIF said the image isn't
+     upright) but failed, it throws
+     `` `${ORIENTATION_BAKE_FAILED_MESSAGE_PREFIX}${message}` ``, again
+     rather than silently shipping un-rotated bytes under a placeholder
+     that pretends nothing is wrong;
+   - otherwise (a non-HEIC, no-bake-needed input that still fails to
+     decode — unexpected, but handled defensively) it keeps a `0x0`
+     placeholder, preserving existing behavior for callers/servers that
+     validate dimensions themselves.
+
+## Caveats
+
+- **Canvas-based rotation, not a hand-rolled matrix.** Baking delegates the
+  actual rotate/flip math to `createImageBitmap(blob, { imageOrientation:
+  'from-image' })`, which every evergreen browser implements, instead of
+  hand-rolling the 8-case EXIF orientation matrix.
+- **An orientation bake preserves the original's PNG/WebP MIME type; every
+  other type re-encodes as JPEG.** Only the PNG case is actually lossless —
+  a WebP source is still re-encoded through canvas's lossy WebP path and
+  does honor `bakeQuality`, it just isn't converted to JPEG the way a
+  non-PNG/WebP source is.
+- **`exifr` is asked not to translate values.** `exifr`'s default
+  (`translateValues: true`) turns the numeric `Orientation` tag into a
+  human-readable string (e.g. `"Rotate 90 CW"`); this module requests raw
+  values so `needsOrientationBake`'s numeric check actually matches.
+- **A failed or absent EXIF read never throws** — `exifr.parse` errors
+  (malformed or missing EXIF) are caught internally and resolve to
+  `{ takenAt: null, exifOrientation: undefined }`.
