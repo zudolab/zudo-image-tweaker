@@ -1,6 +1,6 @@
 {
   "name": "@takazudo/zudo-image-tweaker",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "sharp-based image-tweaking toolkit: variants, HEIF conversion, OGP cards, byte-budget encoding, square crops, product-photo background removal, calibration, compositing, blurhash, EXIF, and browser upload prep.",
   "private": false,
   "license": "MIT",
