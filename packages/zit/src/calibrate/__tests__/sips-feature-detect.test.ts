@@ -1,114 +1,110 @@
 import { writeFileSync } from 'node:fs';
-import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // This dev machine has no `sips` (macOS-only), so the feature-detect
 // branches (available vs ENOENT) are exercised via a mock of
 // node:child_process rather than a real binary. execFile is mocked at the
-// module level with vi.hoisted so the mock exists before ../index.js's
-// static `import { execFile } from 'node:child_process'` resolves it.
+// module level with vi.hoisted so the mock exists before the static
+// `import { execFile } from 'node:child_process'` in the shared run seam
+// resolves it — that seam backs both /calibrate and the /heif module it
+// now delegates HEIC decoding to.
 const { execFileMock } = vi.hoisted(() => ({ execFileMock: vi.fn() }));
 
 vi.mock('node:child_process', () => ({
   execFile: execFileMock,
 }));
 
-describe('HEIC/HEIF sips feature detection', () => {
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const TMAP_FIXTURE = path.join(
+  __dirname,
+  '..',
+  '..',
+  'heif',
+  '__tests__',
+  'fixtures',
+  'tmap-gainmap.heic',
+);
+
+function mockSipsMissing() {
+  execFileMock.mockImplementation(
+    (_file: string, _args: string[], _options: unknown, callback: (err: unknown) => void) => {
+      const err = new Error('spawn sips ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      callback(err);
+    },
+  );
+}
+
+describe('HEIC/HEIF decode delegation to /heif', () => {
   beforeEach(() => {
     execFileMock.mockReset();
     vi.resetModules();
   });
 
-  it('throws a descriptive, documented capability-loss error when sips is unavailable (ENOENT)', async () => {
-    execFileMock.mockImplementation(
-      (_file: string, _args: string[], _options: unknown, callback: (err: unknown) => void) => {
-        const err = new Error('spawn sips ENOENT') as NodeJS.ErrnoException;
-        err.code = 'ENOENT';
-        callback(err);
-      },
-    );
+  it('falls back to the Node/WASM decoder when sips is unavailable (ENOENT)', async () => {
+    mockSipsMissing();
 
     const { sampleBackgroundColor } = await import('../index.js');
 
-    await expect(sampleBackgroundColor('/fake/path/photo.heic')).rejects.toThrow(
-      /sips.*unavailable on this platform/i,
-    );
+    // Used to throw a capability-loss error here (issue #102). `sips` is still
+    // attempted first — the fallback is what changed, not the ordering.
+    const color = await sampleBackgroundColor(TMAP_FIXTURE);
 
+    for (const channel of [color.r, color.g, color.b]) {
+      expect(channel).toBeGreaterThanOrEqual(0);
+      expect(channel).toBeLessThanOrEqual(255);
+    }
     expect(execFileMock).toHaveBeenCalledWith(
       'sips',
-      [
-        '-s',
-        'format',
-        'jpeg',
-        '-s',
-        'formatOptions',
-        '95',
-        '/fake/path/photo.heic',
-        '--out',
-        expect.any(String),
-      ],
+      expect.arrayContaining(['-s', 'format', 'jpeg', '--out']),
       expect.objectContaining({ timeout: expect.any(Number) }),
       expect.any(Function),
     );
   });
 
-  it('wraps a non-ENOENT sips failure with actionable gain-map/pre-convert guidance (issue #34)', async () => {
+  it('falls back when sips is present but fails on the input (gain-map case)', async () => {
     execFileMock.mockImplementation(
       (_file: string, _args: string[], _options: unknown, callback: (err: unknown) => void) => {
-        callback(new Error('sips: corrupt file'));
-      },
-    );
-
-    const { sampleBackgroundColor } = await import('../index.js');
-
-    // The original sips message is preserved inside the wrapped error...
-    await expect(sampleBackgroundColor('/fake/path/photo.heic')).rejects.toThrow(/corrupt file/);
-    // ...alongside guidance mentioning the macOS gain-map limitation and the
-    // /heif pre-conversion route, so callers can diagnose either failure mode.
-    await expect(sampleBackgroundColor('/fake/path/photo.heic')).rejects.toThrow(/gain map/i);
-    await expect(sampleBackgroundColor('/fake/path/photo.heic')).rejects.toThrow(/\/heif/);
-  });
-
-  it('cleans up the partial temp JPEG when sips fails after writing one (issue #34)', async () => {
-    let writtenTempPath: string | undefined;
-    execFileMock.mockImplementation(
-      (_file: string, args: string[], _options: unknown, callback: (err: unknown) => void) => {
-        const outIndex = args.indexOf('--out');
-        writtenTempPath = args[outIndex + 1];
-        // Mirrors a real partial-output sips failure (e.g. the documented
-        // gain-map auxiliary-image-reference limit): sips writes a partial
-        // file to `--out` before exiting non-zero.
-        writeFileSync(writtenTempPath, 'partial');
         callback(new Error('sips: too many auxiliary image references'));
       },
     );
 
     const { sampleBackgroundColor } = await import('../index.js');
 
-    await expect(sampleBackgroundColor('/fake/path/photo.heic')).rejects.toThrow();
-    expect(writtenTempPath).toBeDefined();
-    await expect(fs.stat(writtenTempPath!)).rejects.toThrow(/ENOENT/);
+    // The exact failure this module used to rethrow with pre-convert guidance:
+    // a real gain-map HEIC that the system libheif behind sips rejects.
+    await expect(sampleBackgroundColor(TMAP_FIXTURE)).resolves.toEqual(
+      expect.objectContaining({ r: expect.any(Number) }),
+    );
   });
 
-  it('routes .heif input through the same sips feature-detect path as .heic', async () => {
-    execFileMock.mockImplementation(
-      (_file: string, _args: string[], _options: unknown, callback: (err: unknown) => void) => {
-        const err = new Error('spawn sips ENOENT') as NodeJS.ErrnoException;
-        err.code = 'ENOENT';
-        callback(err);
-      },
-    );
+  it('routes .heif input through the same delegation as .heic', async () => {
+    mockSipsMissing();
 
     const { normalizeBackgroundColor } = await import('../index.js');
 
-    await expect(
-      normalizeBackgroundColor('/fake/path/photo.heif', { target: { r: 100, g: 100, b: 100 } }),
-    ).rejects.toThrow(/sips.*unavailable on this platform/i);
+    // Extension-keyed, so a .heif path must reach /heif too. The fixture is a
+    // HEIC byte-wise; only the extension check is under test here.
+    const heifNamed = path.join(__dirname, 'tmp-extension-probe.heif');
+    const { readFileSync, rmSync } = await import('node:fs');
+    writeFileSync(heifNamed, readFileSync(TMAP_FIXTURE));
+    try {
+      const { buffer } = await normalizeBackgroundColor(heifNamed, {
+        target: { r: 100, g: 100, b: 100 },
+      });
+      expect(buffer.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(heifNamed, { force: true });
+    }
   });
 
   it('converts a HEIC input via sips exactly once per normalizeBackgroundColor call (issue #50)', async () => {
     const sharp = (await import('sharp')).default;
-    const fixtureJpeg = await sharp({ create: { width: 200, height: 200, channels: 3, background: { r: 150, g: 100, b: 60 } } })
+    const fixtureJpeg = await sharp({
+      create: { width: 200, height: 200, channels: 3, background: { r: 150, g: 100, b: 60 } },
+    })
       .jpeg({ quality: 100 })
       .toBuffer();
 
@@ -131,7 +127,10 @@ describe('HEIC/HEIF sips feature detection', () => {
 
     const { normalizeBackgroundColor } = await import('../index.js');
 
-    const result = await normalizeBackgroundColor('/fake/path/photo.heic', {
+    // A real path, not a synthetic one: /heif size-guards its input with a
+    // stat before any conversion, so a nonexistent path would fail there
+    // rather than reaching the sips call this test is counting.
+    const result = await normalizeBackgroundColor(TMAP_FIXTURE, {
       target: { r: 150, g: 100, b: 60 },
     });
 
