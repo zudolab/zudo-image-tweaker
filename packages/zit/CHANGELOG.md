@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+### Fixed
+
+- fix(calibrate): decode HEIC via /heif instead of hard-erroring off macOS (fec0285, [#103](https://github.com/zudolab/zudo-image-tweaker/pull/103))
+
 ## 0.1.1
 
 ### Other Changes
