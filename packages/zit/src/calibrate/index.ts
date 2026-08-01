@@ -18,19 +18,27 @@
  * non-default orientation tag are sampled and corrected in their
  * upright, displayed orientation, not their as-stored one.
  *
- * HEIC/HEIF decoding is feature-detected via macOS `sips` (invoked with
- * `execFile` argument arrays, never a shell string) because this module
- * carries no Node-native HEIC decoder. `sampleBackgroundColor` and
- * `normalizeBackgroundColor` throw a descriptive error for `.heic`/`.heif`
- * input on any platform where `sips` is unavailable (Linux, Windows) —
- * pre-convert such inputs to JPEG/PNG (e.g. via the sibling `/heif`
- * module, which does carry a Node-native fallback) before calling into
- * this module. Buffer input bypasses HEIC handling entirely; only a
- * string path is checked for a `.heic`/`.heif` extension. A `sips` failure
- * for any reason other than being absent (e.g. an HDR "gain map" HEIC
- * whose auxiliary-image references exceed the system libheif's limit —
- * see `/heif`'s module doc for the full explanation) is rethrown wrapped
- * with the same pre-convert-via-`/heif` guidance (issue #34).
+ * HEIC/HEIF decoding is delegated wholesale to the sibling `/heif`
+ * module's `convertHeifToJpeg` (issue #102), which tries macOS `sips`
+ * first and falls back to its bundled Node/WASM decoder whenever `sips`
+ * is unavailable (Linux, Windows) OR fails on a given input. This module
+ * used to own a `sips`-only path and threw a capability-loss error
+ * everywhere else, telling callers to pre-convert via `/heif` — but
+ * `heic-decode` is a direct dependency of this package, so every consumer
+ * was reimplementing a dance the package could already do for itself.
+ * That mattered most for the HDR "gain map" HEICs modern phone cameras
+ * emit: their auxiliary-image references exceed the system libheif's
+ * limit, so `sips` AND sharp's bundled libheif both reject them while the
+ * WASM decoder handles them fine. Buffer input bypasses HEIC handling
+ * entirely; only a string path is checked for a `.heic`/`.heif`
+ * extension.
+ *
+ * TRUSTED-INPUT ONLY, inherited: routing through `/heif` means HEIC input
+ * to this module can reach `heic-decode` -> bundled `libheif-js` 1.19.8,
+ * which predates the libheif 1.22.0 fixes for CVE-2026-32740 (heap
+ * overflow) and CVE-2026-32739 (infinite-loop DoS). Only calibrate
+ * HEIC/HEIF files from sources you trust. See `/heif`'s module doc for
+ * the full statement of the exposure.
  *
  * ICC profile (issue #35): `normalizeBackgroundColor` samples and corrects
  * pixels via a raw decode, which yields the source's literal device-space
@@ -57,13 +65,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
-import { isMissingBinaryError, resolveBinaryPath, run } from '../variants/run.js';
+import { convertHeifToJpeg } from '../heif/index.js';
 
 // Same default as the shared variants runner (src/variants/run.ts): long
 // enough for a real conversion, short enough that a hung `sips` process
-// can't stall a caller forever (issue #67). Unlike /heif this module has
-// no Node-native HEIC fallback, so a timeout still surfaces as an error —
-// the same contract a non-timeout `sips` failure already has.
+// can't stall a caller forever (issue #67). Since HEIC now routes through
+// /heif (issue #102), a timeout falls through to that module's Node/WASM
+// decoder rather than surfacing as an error.
 const DEFAULT_SIPS_TIMEOUT_MS = 60_000;
 
 const DEFAULT_PATCH_SIZE = 50;
@@ -93,7 +101,8 @@ export interface SampleBackgroundColorOptions {
   patchSize?: number;
   /**
    * HEIC/HEIF input only: kill the `sips` conversion subprocess if it
-   * hasn't exited after this many ms. @default 60000
+   * hasn't exited after this many ms, falling back to `/heif`'s Node/WASM
+   * decoder. @default 60000
    */
   sipsTimeoutMs?: number;
 }
@@ -113,7 +122,8 @@ export interface NormalizeBackgroundColorOptions {
   format?: 'jpeg' | 'png' | 'webp' | 'tiff';
   /**
    * HEIC/HEIF input only: kill the `sips` conversion subprocess if it
-   * hasn't exited after this many ms. @default 60000
+   * hasn't exited after this many ms, falling back to `/heif`'s Node/WASM
+   * decoder. @default 60000
    */
   sipsTimeoutMs?: number;
 }
@@ -131,65 +141,6 @@ function isHeicPath(input: string): boolean {
   return /\.hei[cf]$/i.test(input);
 }
 
-/**
- * Convert a HEIC/HEIF file to a temporary JPEG via macOS `sips`, feature-
- * detected through `execFile`'s ENOENT (never a shell string). Returns
- * null when `sips` isn't present so the caller can surface a clear
- * capability-loss error; any other `sips` failure (e.g. a genuinely
- * corrupt file) is rethrown unchanged.
- */
-async function tryHeicToTempJpeg(heicPath: string, timeoutMs: number): Promise<string | null> {
-  // randomUUID (not pid+timestamp) avoids output-path collisions between
-  // concurrent conversions in the same process, matching the sibling /heif
-  // module's tryConvertWithSips.
-  const tempPath = path.join(os.tmpdir(), `zit-calibrate-${process.pid}-${randomUUID()}.jpg`);
-  try {
-    // Shared hardened exec seam (variants/run.ts): argument array (never a
-    // shell string), the input path resolved before it reaches argv so a
-    // leading-dash relative filename can't be read as an option flag (issue
-    // #66), and a SIGKILL-enforced timeout (issue #67). Argument order
-    // matches the sibling /heif module — all `-s` options first, then the
-    // input file, then `--out` last — per `man sips`
-    // (`sips [options] file... --out outfile`). On timeout `run` rejects,
-    // handled below like any other non-ENOENT sips failure.
-    await run(
-      'sips',
-      [
-        '-s',
-        'format',
-        'jpeg',
-        '-s',
-        'formatOptions',
-        '95',
-        resolveBinaryPath(heicPath),
-        '--out',
-        tempPath,
-      ],
-      { timeoutMs },
-    );
-  } catch (error) {
-    // A non-zero `sips` exit can still leave a partial `tempPath` on disk
-    // (e.g. the gain-map failure documented below) — force-remove it here,
-    // mirroring the sibling /heif module's tryConvertWithSips, so a
-    // failed conversion never leaks a temp JPEG (issue #34).
-    await fs.rm(tempPath, { force: true });
-    if (isMissingBinaryError(error)) {
-      return null;
-    }
-    throw new Error(
-      `HEIC/HEIF conversion via 'sips' failed for '${heicPath}': ${(error as Error).message}. ` +
-        "This can happen with HDR \"gain map\" HEIC files, which the system libheif that " +
-        '`sips` relies on may reject via a strict auxiliary-image-reference limit. ' +
-        "Pre-convert '" +
-        heicPath +
-        "' via the sibling /heif module (whose Node fallback does not carry that limit) " +
-        'before calling this function.',
-      { cause: error },
-    );
-  }
-  return tempPath;
-}
-
 interface DecodeSource {
   sharpInput: string | Buffer;
   cleanup: () => Promise<void>;
@@ -197,23 +148,23 @@ interface DecodeSource {
 
 /**
  * Resolve an `input` into something sharp can decode directly. HEIC/HEIF
- * string paths are routed through `sips` first; every other input (any
- * Buffer, or a non-HEIC path) passes through unchanged.
+ * string paths are handed to the sibling `/heif` module, which owns the
+ * whole sips-then-Node/WASM decode ladder (issue #102); every other input
+ * (any Buffer, or a non-HEIC path) passes through unchanged.
+ *
+ * `convertHeifToJpeg` hands back a Buffer, which sharp accepts directly —
+ * so unlike the old sips-only path this needs no temp file and no cleanup.
+ * Quality 95 matches what that path asked `sips` for. The ICC profile
+ * `/heif` splices into the JPEG survives, which is what keeps
+ * `normalizeBackgroundColor`'s wide-gamut re-attach working for HEIC input.
  */
 async function resolveDecodeSource(
   input: string | Buffer,
   sipsTimeoutMs: number,
 ): Promise<DecodeSource> {
   if (typeof input === 'string' && isHeicPath(input)) {
-    const tempPath = await tryHeicToTempJpeg(input, sipsTimeoutMs);
-    if (!tempPath) {
-      throw new Error(
-        `HEIC/HEIF decoding requires macOS 'sips', which is unavailable on this platform. ` +
-          `Pre-convert '${input}' to JPEG/PNG (e.g. via the sibling /heif module) before ` +
-          'calling this function.',
-      );
-    }
-    return { sharpInput: tempPath, cleanup: () => fs.rm(tempPath, { force: true }) };
+    const { buffer } = await convertHeifToJpeg(input, { quality: 95, sipsTimeoutMs });
+    return { sharpInput: buffer, cleanup: async () => {} };
   }
   return { sharpInput: input, cleanup: async () => {} };
 }
