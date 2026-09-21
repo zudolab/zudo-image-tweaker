@@ -26,9 +26,19 @@ fail() {
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Machine-wide queue for heavy steps, shared by every agent session on this machine
+# (owner's ~/.claude or ~/.codex). Absent on CI and on other machines → runs directly.
+heavy() {
+  local g="${HEAVY_GUARD:-}"
+  [ -n "$g" ] || for c in "$HOME/.claude/scripts/heavy-guard.sh" "$HOME/.codex/scripts/heavy-guard.sh"; do
+    [ -x "$c" ] && { g="$c"; break; }
+  done
+  if [ -n "$g" ] && [ -z "${CI:-}" ]; then "$g" -- "$@"; else "$@"; fi
+}
+
 # ── Step 1: Build ────────────────────────────────
 step "Step 1/4: Build (pnpm -r build)"
-if (cd "$ROOT_DIR" && pnpm build); then
+if (cd "$ROOT_DIR" && heavy pnpm build); then
   pass "Build passed"
 else
   fail "Build"
@@ -36,7 +46,7 @@ fi
 
 # ── Step 2: Tests ────────────────────────────────
 step "Step 2/4: Tests (pnpm -r test)"
-if (cd "$ROOT_DIR" && pnpm test); then
+if (cd "$ROOT_DIR" && heavy pnpm test); then
   pass "All tests passed"
 else
   fail "Tests"
@@ -52,7 +62,7 @@ fi
 
 # ── Step 4: Check pack ───────────────────────────
 step "Step 4/4: Check pack (scripts/check-pack.sh)"
-if (cd "$ROOT_DIR" && bash scripts/check-pack.sh); then
+if (cd "$ROOT_DIR" && heavy bash scripts/check-pack.sh); then
   pass "Check pack passed"
 else
   fail "Check pack"
