@@ -95,6 +95,46 @@ describe('removeBackground optional peer contract', () => {
   });
 });
 
+describe('removeBackground input handling', () => {
+  async function capturedSourceFor(input: Buffer): Promise<unknown> {
+    vi.resetModules();
+    const spy = vi.fn(async () => new Blob([Buffer.from('out')], { type: 'image/png' }));
+    vi.doMock(IMGLY_PACKAGE, () => ({ removeBackground: spy }));
+    const { removeBackground } = await import('../index.js');
+    await removeBackground(input);
+    vi.doUnmock(IMGLY_PACKAGE);
+    vi.resetModules();
+    return (spy.mock.calls[0] as unknown[])[0];
+  }
+
+  it('passes a Buffer to imgly as a Blob typed with its detected MIME', async () => {
+    const sharp = (await import('sharp')).default;
+    const jpeg = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: { r: 0, g: 0, b: 255 } },
+    })
+      .jpeg()
+      .toBuffer();
+
+    const source = await capturedSourceFor(jpeg);
+    expect(source).toBeInstanceOf(Blob);
+    expect((source as Blob).type).toBe('image/jpeg');
+  });
+
+  it('re-encodes formats imgly cannot decode to a PNG Blob', async () => {
+    const sharp = (await import('sharp')).default;
+    const tiff = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: { r: 0, g: 255, b: 0 } },
+    })
+      .tiff()
+      .toBuffer();
+
+    const source = await capturedSourceFor(tiff);
+    expect((source as Blob).type).toBe('image/png');
+    const head = Buffer.from(await (source as Blob).arrayBuffer()).subarray(0, 8);
+    expect(head.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(true);
+  });
+});
+
 // Gated behind RUN_ML_TESTS=1 — downloads ~80MB of ONNX models on first run.
 // NEVER enabled by default or in CI; opt-in only for local, manual verification.
 describe.skipIf(process.env.RUN_ML_TESTS !== '1')('removeBackground (real ML path)', () => {
