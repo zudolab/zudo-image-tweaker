@@ -41,7 +41,7 @@ env:
   # Update this every time NPM_TOKEN is rotated. This is the only place
   # the rotation date is tracked — there is no repo variable to keep in
   # sync with it.
-  NPM_TOKEN_ROTATED_ON: "2026-07-17"
+  NPM_TOKEN_ROTATED_ON: "2026-10-26"
   # Remind this many days before npm's 90-day expiration cap.
   REMIND_AFTER_DAYS: "75"
   TRACKING_ISSUE_TITLE: "npm token nearing expiry — rotate NPM_TOKEN"
