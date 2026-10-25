@@ -1,8 +1,8 @@
 ---
-title: "/doc/CLAUDE.md"
-description: "CLAUDE.md at /doc/CLAUDE.md"
+title: /doc/CLAUDE.md
+description: CLAUDE.md at /doc/CLAUDE.md
 sidebar_position: 2
-sidebar_label: "doc/CLAUDE.md"
+sidebar_label: doc/CLAUDE.md
 generated: true
 ---
 
@@ -10,39 +10,62 @@ generated: true
 
 # Doc
 
-Documentation site built with [zudo-doc](https://github.com/zudolab/zudo-doc) — a zfb-based documentation framework with MDX, Tailwind CSS v4, and Preact islands. This project is intentionally minimal: one config file (`zfb.config.ts`) plus markdown content — layout, chrome, and islands all ship from `@takazudo/zudo-doc` in `node_modules`.
+Documentation site built with [zudo-doc](https://github.com/zudolab/zudo-doc) — a zfb-based documentation framework with MDX, zudo-react, and zudo-wind. This project is intentionally minimal: one config file (`zfb.config.ts`) plus markdown content — layout, chrome, and islands all ship from `@takazudo/zudo-doc` in `node_modules`.
+
+`doc/` is a standalone project, deliberately kept OUT of the repo-root pnpm workspace (`pnpm-workspace.yaml` here declares `packages: []`). Always run commands scoped to it: `pnpm -C doc <script>`.
+
+## Scaffold Provenance
+
+Re-scaffolded from **create-zudo-doc 8.1.0** (features: search, claudeResources, llmsTxt, imageEnlarge, dynamicPageTransition, skill-symlinker). Installed versions at scaffold time:
+
+- `@takazudo/zudo-doc` 8.1.0
+- `@takazudo/zfb` 5.1.2
+- `@takazudo/zfb-runtime` 5.1.2
+- `@takazudo/zfb-md-wasm` 5.1.2
+
+Requires Node >= 24 (zfb 5 / zudo-doc 8 engines).
 
 ## Tech Stack
 
 - **zfb** — documentation build framework
 - **MDX** — content format, authored under `src/content/`
-- **Tailwind CSS v4** — via `@tailwindcss/vite`
-- **Preact** — for interactive islands only (with compat mode for React API)
-- **syntect** — built-in code highlighting, run by zfb's Rust pipeline at build time (dual light/dark theme, follows the site's color-mode toggle)
-- **@takazudo/zudo-doc** — the package that owns everything: layout, chrome, islands, default `@theme` design tokens, and (via `packageOwnedRoutes`, on by default) the doc routes themselves
+- **zudo-wind** — zfb compiles the package preset's utility manifest and owned-v1 reset; `src/styles/global.css` imports public `@takazudo/zudo-doc/*.css` exports and provides a `:root` custom-property override slot. Override the preset through top-level `wind` in `zfb.config.ts`; no separate safelist or reset stylesheet is needed
+- **zudo-react** — the JSX and component runtime used by package-owned routes and islands
+- **zfb semantic highlighting** — native build-time fenced-code rendering plus lazy `@takazudo/zfb-md-wasm` for HtmlPreview; both emit `hi-*` classes resolved through `--zd-syntax-*` design tokens
+- **@takazudo/zudo-doc** — the package that owns everything: layout, chrome, islands, default design-token custom properties, and (via `packageOwnedRoutes`, on by default) the doc routes themselves
 
 ## Commands
 
 - `pnpm dev` — zfb dev server (port 4321)
 - `pnpm build` — static HTML export to `dist/`
 - `pnpm check` — TypeScript type checking
+- `pnpm check:links` — link + anchor check over the content and the built `dist/` (run `pnpm build` first); fails on broken links or invalid anchors
+- `pnpm check:examples` — type-checks `examples-check/*.ts` against the built library declarations in `packages/zit/dist` (build the root package first)
 - `pnpm preview` — serve the built `dist/`
+- `pnpm b4push` — `check` + `build` + `check:links`
+- `pnpm setup:doc-skill` (`-silent`, `:claude`, `:codex`, `:both`) — generate the `doc-wisdom` lookup skill and symlink it into the user-scope skills dir
 
 ## Key Directories
 
 ```
 zfb.config.ts             # THE one config file — zudoDoc({ ...only fields you chose })
+wrangler.toml             # Cloudflare Workers static-assets deploy config
 pages/
 ├── index.tsx             # 1-line re-export of the package home route
 └── docs/[[...slug]].tsx  # self-contained doc-route stub (required for `pnpm dev`)
+public/                   # favicons (auto-detected by zudo-doc)
+scripts/
+├── check-links.js        # link/anchor checker (create-zudo-doc template)
+└── setup-doc-skill.sh    # doc-wisdom skill generator
+examples-check/           # typechecked copies of the docs' code examples
 src/
 ├── content/
-│   └── docs/             # MDX content (this project's showcase docs)
+│   └── docs/             # MDX content (claude-* pages are generated from ../.claude and CLAUDE.md files)
 └── styles/
     └── global.css        # @import chain + a token-override slot — that's it
 ```
 
-Everything else — layout, header, sidebar, footer, doc chrome, islands, and the default design tokens — lives in `node_modules/@takazudo/zudo-doc`. To customize a specific piece, use the eject CLI: `npx zudo-doc eject <component>` copies one package component into this project so you can edit it (see `@takazudo/zudo-doc`'s eject-contract docs). Settings you didn't set explicitly in `zfb.config.ts` use the package's documented defaults — hover `zudoDoc`'s `ZudoDocConfig` argument in your editor to see every field and its `@default`.
+Everything else — layout, header, sidebar, footer, doc chrome, islands, and the default design tokens — lives in `node_modules/@takazudo/zudo-doc`. For supported markup replacement, create `src/chrome-bindings.tsx` with `defineChromeBindings`, set `chromeBindingsModule`, and use the primary `Header` / `Footer` / `Sidebar` / `Toc` / `Breadcrumb` / `DocPager` slots or the named `headerRightComponents` registry. `npx zudo-doc eject <component>` only copies source: heed its primary, nested-chrome, or content-layer remediation before expecting the copy to render. Settings you didn't set explicitly in `zfb.config.ts` use the package's documented defaults — hover `zudoDoc`'s `ZudoDocConfig` argument in your editor to see every field and its `@default`.
 
 ## Content Conventions
 
@@ -54,7 +77,9 @@ Everything else — layout, header, sidebar, footer, doc chrome, islands, and th
 
 ### Admonitions
 
-Available in all MDX files without imports, via directive syntax: `:::note`, `:::tip`, `:::info`, `:::warning`, `:::danger`, `:::caution`, `:::details`. Each accepts an optional `{title="..."}` attribute.
+Available in all MDX files without imports, via directive syntax: `:::note`, `:::tip`, `:::info`, `:::warning`, `:::danger`, `:::caution`, `:::details`. Each accepts an optional **bracketed** title: `:::note[Custom Title]`.
+
+Docusaurus-style `{title="..."}` is **NOT supported**. MDX parses the braces as a JS expression, so it either fails the build with `ReferenceError: title is not defined` or is silently ignored. Always use the bracketed form.
 
 ### Headings
 
@@ -62,16 +87,18 @@ Do NOT use h1 (`#`) in doc content — the page title from frontmatter is render
 
 ### Built-in MDX components
 
-`@takazudo/zudo-doc` ships a few **globally-available MDX components** — usable in any `.mdx` file with **no import**. The seeded `getting-started/index.mdx` already uses one:
+`@takazudo/zudo-doc` ships a few **globally-available MDX components** — usable in any `.mdx` file with **no import**:
 
-- `<CategoryNav category="..." />` — a card-grid list of the pages in a docs category (this is the one seeded into `getting-started/index.mdx`).
+- `<CategoryNav category="..." />` — a card-grid list of the pages in a docs category.
 - `<CategoryTreeNav category="..." />` — the same listing as a compact nested tree, better for deeper hierarchies.
 - `<SiteTreeNavDemo />` — a full-site documentation tree (the MDX-available wrapper of the `SiteTreeNav` island).
 
-Admonitions (above), tabbed content (`<Tabs>` / `<TabItem>`, `<CodeGroup>`), and block math (`<MathBlock>`) work the same way — no import. Full reference: https://zudo-doc.takazudomodular.com/docs/components/
+Admonitions (above), tabbed content (`<Tabs>` / `<TabItem>`, `<CodeGroup>`), and block math (`<MathBlock>`, needs `katex` installed) work the same way — no import. Full reference: https://zudo-doc.takazudomodular.com/docs/components/
 
 ## Enabled Features
 
-- **search** — Full-text search via Pagefind
-- **claudeResources** — Auto-generated docs for Claude Code resources
+- **search** — Full-text search
+- **claudeResources** — Auto-generated docs for Claude Code resources (`../.claude`, repo-wide CLAUDE.md scan)
 - **llmsTxt** — Generates llms.txt for LLM consumption
+- **imageEnlarge** — Click-to-enlarge for oversized markdown images
+- **dynamicPageTransition** — SPA-style page transitions
