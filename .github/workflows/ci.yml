@@ -130,9 +130,9 @@ jobs:
         run: pnpm -F @takazudo/zudo-image-tweaker exec vitest run src/heif src/calibrate
 
   doc-examples:
-    name: Doc examples anti-drift check
+    name: Doc site gate (examples, check, build, links, wind audit, audit)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -143,7 +143,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          # zfb 5 / zudo-doc 8 require Node >=24 (doc/package.json engines).
+          node-version: 24
 
       # doc/examples-check/tsconfig.json maps every subpath import straight at
       # packages/zit/dist/**/*.d.ts (plus packages/zit/node_modules/sharp for
@@ -168,3 +169,27 @@ jobs:
       # that the docs forgot to update fails CI instead of shipping stale docs.
       - name: Check doc examples
         run: pnpm -C doc check:examples
+
+      - name: Check doc content and types
+        run: pnpm -C doc check
+
+      # The build exits 0 on broken links and ZW009, so grep the log to make
+      # them fail the job.
+      - name: Build doc site
+        run: |
+          set -o pipefail
+          pnpm -C doc build 2>&1 | tee doc-build.log
+          if grep -qiE 'broken link|ZW009' doc-build.log; then
+            echo "::error::doc build log contains 'broken link' or ZW009"
+            grep -inE 'broken link|ZW009' doc-build.log
+            exit 1
+          fi
+
+      - name: Check doc links (strict)
+        run: pnpm -C doc check:links
+
+      - name: zudo-wind audit
+        run: pnpm -C doc exec zfb wind audit --project-root . --fail-on error
+
+      - name: Audit doc dependencies (high+)
+        run: pnpm -C doc audit --audit-level high
