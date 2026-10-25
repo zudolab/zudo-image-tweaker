@@ -67,7 +67,7 @@ export interface ComposeProductPhotoResult {
  */
 export async function removeBackground(input: ImageInput | URL): Promise<Buffer> {
   const imgly = await loadImgly();
-  const source = toImageSource(input);
+  const source = await toImageSource(input);
   const resultBlob = await imgly.removeBackground(source);
   const arrayBuffer = await resultBlob.arrayBuffer();
   return Buffer.from(arrayBuffer);
@@ -108,10 +108,21 @@ function isModuleNotFoundError(err: unknown): boolean {
   return false;
 }
 
-function toImageSource(input: ImageInput | URL): Buffer | URL | string {
-  if (Buffer.isBuffer(input)) return input;
+// imgly sniffs a Blob's MIME type and rejects a bare Buffer ("Unsupported format"),
+// and only decodes these three; anything else is re-encoded to PNG first.
+const IMGLY_MIME_BY_FORMAT: Record<string, string> = {
+  png: 'image/png',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+};
+
+async function toImageSource(input: ImageInput | URL): Promise<Blob | URL | string> {
   if (input instanceof URL) return input;
-  return pathToFileURL(path.resolve(input)).href;
+  if (!Buffer.isBuffer(input)) return pathToFileURL(path.resolve(input)).href;
+  const { format } = await sharp(input).metadata();
+  const mime = format ? IMGLY_MIME_BY_FORMAT[format] : undefined;
+  if (mime) return new Blob([new Uint8Array(input)], { type: mime });
+  return new Blob([new Uint8Array(await sharp(input).png().toBuffer())], { type: 'image/png' });
 }
 
 /**
