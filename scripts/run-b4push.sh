@@ -37,7 +37,7 @@ heavy() {
 }
 
 # ── Step 1: Build ────────────────────────────────
-step "Step 1/4: Build (pnpm -r build)"
+step "Step 1/5: Build (pnpm -r build)"
 if (cd "$ROOT_DIR" && heavy pnpm build); then
   pass "Build passed"
 else
@@ -45,7 +45,7 @@ else
 fi
 
 # ── Step 2: Tests ────────────────────────────────
-step "Step 2/4: Tests (pnpm -r test)"
+step "Step 2/5: Tests (pnpm -r test)"
 if (cd "$ROOT_DIR" && heavy pnpm test); then
   pass "All tests passed"
 else
@@ -53,7 +53,7 @@ else
 fi
 
 # ── Step 3: Typecheck ────────────────────────────
-step "Step 3/4: Typecheck (pnpm -r typecheck)"
+step "Step 3/5: Typecheck (pnpm -r typecheck)"
 if (cd "$ROOT_DIR" && pnpm typecheck); then
   pass "Typecheck passed"
 else
@@ -61,11 +61,34 @@ else
 fi
 
 # ── Step 4: Check pack ───────────────────────────
-step "Step 4/4: Check pack (scripts/check-pack.sh)"
+step "Step 4/5: Check pack (scripts/check-pack.sh)"
 if (cd "$ROOT_DIR" && heavy bash scripts/check-pack.sh); then
   pass "Check pack passed"
 else
   fail "Check pack"
+fi
+
+# ── Step 5: Doc site gate ────────────────────────
+# Mirrors the ci.yml doc-examples job. Needs Node >=24 (doc/package.json engines).
+doc_gate() {
+  local log
+  log="$(mktemp)"
+  trap 'rm -f "$log"' RETURN
+  pnpm -F @takazudo/zudo-image-tweaker build &&
+    pnpm -C doc install --frozen-lockfile &&
+    pnpm -C doc check:examples &&
+    pnpm -C doc check &&
+    { pnpm -C doc build 2>&1 | tee "$log"; [ "${PIPESTATUS[0]}" -eq 0 ]; } &&
+    { ! grep -qiE 'broken link|ZW009' "$log" || { echo "doc build log contains 'broken link' or ZW009"; false; }; } &&
+    pnpm -C doc check:links &&
+    pnpm -C doc exec zfb wind audit --project-root . --fail-on error &&
+    pnpm -C doc audit --audit-level high
+}
+step "Step 5/5: Doc site (examples, check, build, links, wind audit, audit)"
+if (cd "$ROOT_DIR" && heavy bash -c "$(declare -f doc_gate); doc_gate"); then
+  pass "Doc site gate passed"
+else
+  fail "Doc site gate"
 fi
 
 # ── Summary ──────────────────────────────────────
