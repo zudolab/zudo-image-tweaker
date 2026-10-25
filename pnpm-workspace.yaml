@@ -36,10 +36,10 @@ allowBuilds:
 # Selectors are scoped to each vulnerable major line.
 overrides:
   # lodash: prototype pollution / code injection advisories, fixed in 4.17.24
-  "lodash@<4.17.24": ">=4.17.24"
+  "lodash@<4.17.24": "^4.17.24"
   # zod 3.x: ReDoS advisory, fixed in 3.22.3. Not raised to 4.x: imgly calls z.function().args, removed in zod 4
-  "zod@<3.22.3": "3.22.3"
+  "zod@<3.22.3": "^3.22.3"
   # sharp nested under imgly (was 0.32.6): libvips/libheif/librsvg advisories, fixed in 0.35.5; real inference verified
-  "@imgly/background-removal-node>sharp": "0.35.5"
+  "@imgly/background-removal-node>sharp": "^0.35.5"
   # tar (via onnxruntime-node): file-write/path advisories, fixed in 7.5.21
-  "tar@<7.5.21": ">=7.5.21"
+  "tar@<7.5.21": "^7.5.21"
