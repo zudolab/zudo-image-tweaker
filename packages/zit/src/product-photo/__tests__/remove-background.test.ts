@@ -100,10 +100,13 @@ describe('removeBackground input handling', () => {
     vi.resetModules();
     const spy = vi.fn(async () => new Blob([Buffer.from('out')], { type: 'image/png' }));
     vi.doMock(IMGLY_PACKAGE, () => ({ removeBackground: spy }));
-    const { removeBackground } = await import('../index.js');
-    await removeBackground(input);
-    vi.doUnmock(IMGLY_PACKAGE);
-    vi.resetModules();
+    try {
+      const { removeBackground } = await import('../index.js');
+      await removeBackground(input);
+    } finally {
+      vi.doUnmock(IMGLY_PACKAGE);
+      vi.resetModules();
+    }
     return (spy.mock.calls[0] as unknown[])[0];
   }
 

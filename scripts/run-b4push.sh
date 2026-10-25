@@ -69,13 +69,13 @@ else
 fi
 
 # ── Step 5: Doc site gate ────────────────────────
-# Mirrors the ci.yml doc-examples job. Needs Node >=24 (doc/package.json engines).
+# Mirrors the ci.yml doc-examples job (packages/zit dist comes from Step 1).
+# Needs Node >=24 (doc/package.json engines).
 doc_gate() {
   local log
   log="$(mktemp)"
   trap 'rm -f "$log"' RETURN
-  pnpm -F @takazudo/zudo-image-tweaker build &&
-    pnpm -C doc install --frozen-lockfile &&
+  pnpm -C doc install --frozen-lockfile &&
     pnpm -C doc check:examples &&
     pnpm -C doc check &&
     { pnpm -C doc build 2>&1 | tee "$log"; [ "${PIPESTATUS[0]}" -eq 0 ]; } &&
